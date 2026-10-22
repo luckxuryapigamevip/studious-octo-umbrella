@@ -4,6 +4,7 @@ const express = require('express');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 
@@ -37,6 +38,7 @@ function safeInt(x, def = 0) { const n = parseInt(x, 10); return Number.isFinite
 function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
 const label = c => c === 'T' ? 'Tài' : (c === 'X' ? 'Xỉu' : null);
 const flip = c => c === 'T' ? 'X' : (c === 'X' ? 'T' : null);
+const flipSeq = seq => seq.map(flip);
 
 function readDB(g) {
     const p = path.join(DB_DIR, `db_${g}.json`);
@@ -46,8 +48,10 @@ function readDB(g) {
         lastProcessedSession: null,
         algoStats: {},
         weights: {},
-        calibration: { T: [], X: [] }, // đối xứng 2 bên
-        regime: null
+        calibration: { T: [], X: [] },
+        regime: null,
+        recentVotes: [],
+        biasLog: []
     };
 }
 function saveDB(g, db) {
@@ -75,14 +79,9 @@ function entropy(arr) {
     for (const k in f) { const p = f[k] / n; if (p > 0) h -= p * Math.log2(p); }
     return h;
 }
-function variance(arr) {
-    if (!arr.length) return 0;
-    const m = arr.reduce((a, b) => a + b, 0) / arr.length;
-    return arr.reduce((a, b) => a + (b - m) ** 2, 0) / arr.length;
-}
 
 // ========================================================================
-// 5. REGIME DETECTION (chỉ để mô tả, không ép dự đoán)
+// 5. REGIME
 // ========================================================================
 function detectRegime(seq) {
     const n = seq.length;
@@ -105,7 +104,7 @@ function detectRegime(seq) {
 }
 
 // ========================================================================
-// 6. SUFFIX AUTOMATON cho motif mining
+// 6. SUFFIX AUTOMATON
 // ========================================================================
 function buildSuffixAutomaton(str) {
     const n = str.length;
@@ -143,28 +142,34 @@ function buildSuffixAutomaton(str) {
 }
 
 // ========================================================================
-// 7. ALGO MODULES — 16 THUẬT TOÁN CHUYÊN SÂU
+// 7. 18 ALGOS (ĐÃ FIX BIAS TRIỆT ĐỂ)
 // ========================================================================
 
-// ---------- 1. BET (Bệt) ----------
 function algoBet(seq) {
     const n = seq.length, last = seq[n - 1];
     let len = 1;
     for (let i = n - 2; i >= 0; i--) { if (seq[i] === last) len++; else break; }
     if (len < 3) return null;
-    const breaks = []; let cur = 1;
+    const tStreaks = [], xStreaks = [];
+    let cur = 1;
     for (let i = 1; i < n; i++) {
         if (seq[i] === seq[i - 1]) cur++;
-        else { if (cur >= 3) breaks.push(cur); cur = 1; }
+        else {
+            if (cur >= 3) {
+                if (seq[i - 1] === 'T') tStreaks.push(cur);
+                else xStreaks.push(cur);
+            }
+            cur = 1;
+        }
     }
-    const avg = breaks.length ? breaks.reduce((a, b) => a + b, 0) / breaks.length : 4.5;
+    const sameSide = last === 'T' ? tStreaks : xStreaks;
+    const avg = sameSide.length ? sameSide.reduce((a, b) => a + b, 0) / sameSide.length : 4.5;
     const pCont = clamp(1 - (len / (avg * 1.6)), 0.15, 0.85);
-    if (1 - pCont > 0.55) return { code: flip(last), name: `BỆT-GÃY-${len}`, conf: clamp(1 - pCont, 0.6, 0.95) };
-    if (pCont > 0.55) return { code: last, name: `BỆT-${len}`, conf: clamp(pCont, 0.6, 0.95) };
+    if (1 - pCont > 0.55) return { code: flip(last), name: `BỆT-GÃY-${len}`, conf: clamp(1 - pCont, 0.6, 0.9) };
+    if (pCont > 0.55) return { code: last, name: `BỆT-${len}`, conf: clamp(pCont, 0.6, 0.9) };
     return null;
 }
 
-// ---------- 2. MARKOV bậc cao ----------
 function algoMarkov(seq) {
     const n = seq.length;
     let best = null;
@@ -177,16 +182,15 @@ function algoMarkov(seq) {
             }
         }
         const total = t + x;
-        if (total < 2) continue;
+        if (total < 3) continue;
         const pT = (t + 1) / (total + 2), pX = (x + 1) / (total + 2);
         const conf = Math.max(pT, pX);
         const score = conf * Math.log(k + 1) * (total / (total + 3));
-        if (!best || score > best.score) best = { code: pT > pX ? 'T' : 'X', name: `MARKOV-${k}`, conf, score, samples: total };
+        if (!best || score > best.score) best = { code: pT > pX ? 'T' : 'X', name: `MARKOV-${k}`, conf, score };
     }
     return best;
 }
 
-// ---------- 3. NGRAM Repeat ----------
 function algoNGramRepeat(seq) {
     const n = seq.length;
     if (n < 10) return null;
@@ -205,12 +209,11 @@ function algoNGramRepeat(seq) {
         const pT = (t + 1) / (cnt + 2), pX = (x + 1) / (cnt + 2);
         const conf = Math.max(pT, pX);
         const score = conf * Math.log(len + 1) * Math.log(cnt + 1);
-        if (!best || score > best.score) best = { code: pT > pX ? 'T' : 'X', name: `NGRAM-${len}`, conf, score, samples: cnt };
+        if (!best || score > best.score) best = { code: pT > pX ? 'T' : 'X', name: `NGRAM-${len}`, conf, score };
     }
     return best;
 }
 
-// ---------- 4. CYCLE ----------
 function algoCycle(seq) {
     const n = seq.length;
     if (n < 12) return null;
@@ -221,14 +224,13 @@ function algoCycle(seq) {
         const ratio = match / total;
         if (ratio < 0.65) continue;
         const pred = seq[n - p];
-        const conf = clamp(ratio, 0.65, 0.95);
+        const conf = clamp(ratio, 0.65, 0.9);
         const score = conf * Math.log(p + 1);
-        if (!best || score > best.score) best = { code: pred, name: `CYCLE-${p}`, conf, score, period: p };
+        if (!best || score > best.score) best = { code: pred, name: `CYCLE-${p}`, conf, score };
     }
     return best;
 }
 
-// ---------- 5. PALINDROME ----------
 function algoPalindrome(seq) {
     const n = seq.length;
     if (n < 6) return null;
@@ -253,7 +255,6 @@ function algoPalindrome(seq) {
     return null;
 }
 
-// ---------- 6. FLIP (1-1) ----------
 function algoFlip(seq) {
     const n = seq.length;
     if (n < 8) return null;
@@ -263,7 +264,6 @@ function algoFlip(seq) {
     return null;
 }
 
-// ---------- 7. BLOCK TREND ----------
 function algoBlockTrend(seq) {
     const n = seq.length;
     if (n < 10) return null;
@@ -278,21 +278,18 @@ function algoBlockTrend(seq) {
     return null;
 }
 
-// ---------- 8. SUM PATTERN ----------
+// SUM - ĐÃ FIX HOÀN TOÀN (bỏ ngưỡng cứng, chỉ dùng xu hướng đối xứng)
 function algoSumPattern(seq, sums) {
-    if (!sums || sums.length < 10) return null;
-    const recent = sums.slice(-10);
-    const avg = recent.reduce((a, b) => a + b, 0) / recent.length;
-    if (avg >= 13.5) return { code: 'X', name: 'SUM-HIGH', conf: 0.62, score: 1 };
-    if (avg <= 7.5) return { code: 'T', name: 'SUM-LOW', conf: 0.62, score: 1 };
-    const d1 = recent[recent.length - 1] - recent[recent.length - 2];
-    const d2 = recent[recent.length - 1] - 2 * recent[recent.length - 2] + recent[recent.length - 3];
-    if (d1 > 3 && d2 < 0) return { code: 'X', name: 'SUM-PEAK', conf: 0.65, score: 1 };
-    if (d1 < -3 && d2 > 0) return { code: 'T', name: 'SUM-TROUGH', conf: 0.65, score: 1 };
+    if (!sums || sums.length < 15) return null;
+    const recent = sums.slice(-15);
+    const m1 = recent.slice(0, 5).reduce((a, b) => a + b, 0) / 5;
+    const m2 = recent.slice(5, 10).reduce((a, b) => a + b, 0) / 5;
+    const m3 = recent.slice(10, 15).reduce((a, b) => a + b, 0) / 5;
+    if (m1 < m2 && m2 < m3 && m3 - m1 > 2.5) return { code: 'X', name: 'SUM-UP', conf: 0.62, score: m3 - m1 };
+    if (m1 > m2 && m2 > m3 && m1 - m3 > 2.5) return { code: 'T', name: 'SUM-DOWN', conf: 0.62, score: m1 - m3 };
     return null;
 }
 
-// ---------- 9. WEIGHTED TRANSITION ----------
 function algoTransition(seq) {
     const n = seq.length;
     if (n < 8) return null;
@@ -304,14 +301,13 @@ function algoTransition(seq) {
             if (seq[i] === 'T') { t++; wt += w; } else { x++; wx += w; }
         }
     }
-    if (t + x < 3) return null;
+    if (t + x < 4) return null;
     const pT = (wt + 0.5) / (wt + wx + 1), pX = (wx + 0.5) / (wt + wx + 1);
     const conf = Math.max(pT, pX);
-    if (conf < 0.6) return null;
+    if (conf < 0.62) return null;
     return { code: pT > pX ? 'T' : 'X', name: 'TRANS-W', conf, score: conf * (t + x) };
 }
 
-// ---------- 10. STREAK EXHAUST ----------
 function algoStreakExhaust(seq) {
     const n = seq.length;
     if (n < 15) return null;
@@ -326,12 +322,12 @@ function algoStreakExhaust(seq) {
     if (!hist.length) return null;
     const maxH = Math.max(...hist);
     const avgH = hist.reduce((a, b) => a + b, 0) / hist.length;
-    if (len > maxH) return { code: flip(last), name: 'STREAK-MAX', conf: 0.78, score: len / maxH };
+    if (len > maxH) return { code: flip(last), name: 'STREAK-MAX', conf: 0.75, score: len / maxH };
     if (len > avgH * 1.5) return { code: flip(last), name: 'STREAK-AVG', conf: 0.65, score: 1 };
     return null;
 }
 
-// ---------- 11. GAP PRESSURE ----------
+// GAP - ĐÃ FIX ĐỐI XỨNG HOÀN TOÀN
 function algoGap(seq) {
     const n = seq.length;
     if (n < 20) return null;
@@ -346,17 +342,16 @@ function algoGap(seq) {
     const sinceX = n - xP[xP.length - 1];
     const tPress = sinceT / Math.max(tAvg, 1);
     const xPress = sinceX / Math.max(xAvg, 1);
-    if (tPress > xPress * 1.5 && tPress > 1.3) return { code: 'T', name: 'GAP-T', conf: clamp(0.6 + tPress * 0.05, 0.6, 0.82), score: tPress };
-    if (xPress > tPress * 1.5 && xPress > 1.3) return { code: 'X', name: 'GAP-X', conf: clamp(0.6 + xPress * 0.05, 0.6, 0.82), score: xPress };
-    return null;
+    const diff = tPress - xPress;
+    if (Math.abs(diff) < 0.5) return null;
+    if (diff > 0.5) return { code: 'T', name: 'GAP-T', conf: clamp(0.6 + diff * 0.05, 0.6, 0.82), score: diff };
+    return { code: 'X', name: 'GAP-X', conf: clamp(0.6 + Math.abs(diff) * 0.05, 0.6, 0.82), score: Math.abs(diff) };
 }
 
-// ---------- 12. SUFFIX MOTIF ----------
 function algoSuffixMotif(seq) {
     const n = seq.length;
     if (n < 12) return null;
     const sam = buildSuffixAutomaton(seq.join(''));
-    // Tìm context dài nhất khớp từ cuối
     let state = 0, matched = 0;
     for (let i = n - 1; i >= 0; i--) {
         const ns = sam.next[state][seq[i]];
@@ -373,14 +368,13 @@ function algoSuffixMotif(seq) {
             if (nxt === 'T') t++; else if (nxt === 'X') x++;
         }
     }
-    if (t + x < 2) return null;
+    if (t + x < 3) return null;
     const pT = (t + 0.5) / (t + x + 1), pX = (x + 0.5) / (t + x + 1);
     const conf = Math.max(pT, pX);
     if (conf < 0.62) return null;
     return { code: pT > pX ? 'T' : 'X', name: `SAM-${matched}`, conf, score: conf * Math.log(matched + 1) };
 }
 
-// ---------- 13. LZ SIMILARITY ----------
 function lzComplexity(str) {
     const dict = new Set();
     let i = 0, count = 0;
@@ -423,7 +417,6 @@ function algoLZSimilarity(seq) {
     return { code: pT > pX ? 'T' : 'X', name: 'LZ-SIM', conf, score: conf * cnt };
 }
 
-// ---------- 14. MULTI-TIMEFRAME ----------
 function algoMultiTF(seq) {
     const n = seq.length;
     if (n < 24) return null;
@@ -433,18 +426,15 @@ function algoMultiTF(seq) {
         const s = seq.slice(-w);
         const t = s.filter(x => x === 'T').length;
         const pT = t / s.length;
-        // Momentum reversal: cực đoan → đảo, trung tính → bỏ qua
-        if (pT > 0.7) xVotes += 1;
-        else if (pT < 0.3) tVotes += 1;
+        if (pT > 0.68) xVotes += 1;
+        else if (pT < 0.32) tVotes += 1;
     }
-    if (tVotes + xVotes < 1.5) return null;
+    if (tVotes + xVotes < 2) return null;
     const code = tVotes > xVotes ? 'T' : 'X';
     const conf = clamp(0.62 + Math.abs(tVotes - xVotes) * 0.08, 0.62, 0.85);
     return { code, name: 'MULTI-TF', conf, score: Math.abs(tVotes - xVotes) };
 }
 
-// ---------- 15. FRACTAL SELF-SIMILARITY ----------
-// Tìm các đoạn con ở scale khác nhau cùng pattern
 function algoFractal(seq) {
     const n = seq.length;
     if (n < 30) return null;
@@ -456,7 +446,6 @@ function algoFractal(seq) {
         for (let i = 0; i + sc < n - sc; i += sc) {
             const blk = seq.slice(i, i + sc).join('');
             if (blk === lastBlk) {
-                // Xem next block
                 const nb = seq.slice(i + sc, i + sc * 2);
                 if (nb.length === sc) {
                     const first = nb[0];
@@ -473,12 +462,9 @@ function algoFractal(seq) {
     return { code: pT > pX ? 'T' : 'X', name: 'FRACTAL', conf, score: conf * cnt };
 }
 
-// ---------- 16. SUBSEQUENCE MINING ----------
-// Tìm pattern subsequence (không liên tục) khớp
 function algoSubsequence(seq) {
     const n = seq.length;
     if (n < 20) return null;
-    // Lấy subsequence cuối 4 phần tử cách nhau 2
     const sub = [seq[n - 8], seq[n - 6], seq[n - 4], seq[n - 2]].join('');
     let t = 0, x = 0, cnt = 0;
     for (let i = 0; i + 9 < n; i++) {
@@ -492,12 +478,52 @@ function algoSubsequence(seq) {
     if (cnt < 2) return null;
     const pT = (t + 0.5) / (cnt + 1), pX = (x + 0.5) / (cnt + 1);
     const conf = Math.max(pT, pX);
-    if (conf < 0.65) return null;
+    if (conf < 0.62) return null;
     return { code: pT > pX ? 'T' : 'X', name: 'SUBSEQ', conf, score: conf * cnt };
 }
 
+// ---------- 17. MIRROR (cầu gương) ----------
+function algoMirror(seq) {
+    const n = seq.length;
+    if (n < 12) return null;
+    // Cầu gương: nửa đầu của chuỗi gần đây = đảo của nửa sau
+    for (let half = 3; half <= 6; half++) {
+        if (n < half * 2 + 2) continue;
+        const recent = seq.slice(-(half * 2));
+        const first = recent.slice(0, half);
+        const second = recent.slice(half);
+        const firstFlip = first.map(flip).join('');
+        const secondStr = second.join('');
+        if (firstFlip === secondStr) {
+            // Mirror hoàn hảo → predict = first của chu kỳ tiếp
+            const pred = flip(seq[n - 1]);
+            return { code: pred, name: `MIRROR-${half}`, conf: 0.7, score: half };
+        }
+    }
+    return null;
+}
+
+// ---------- 18. PATTERN-Z (Zigzag 3+) ----------
+function algoZigzag(seq) {
+    const n = seq.length;
+    if (n < 15) return null;
+    // Đếm độ dài pattern zigzag: ABAB, ABCABC, ABCDABCD...
+    for (let p = 2; p <= 6; p++) {
+        if (n < p * 2 + 2) continue;
+        let match = true;
+        for (let i = n - p * 2; i < n - p; i++) {
+            if (seq[i] !== seq[i + p]) { match = false; break; }
+        }
+        if (!match) continue;
+        // pattern đúng → predict = seq[n - p]
+        const pred = seq[n - p];
+        return { code: pred, name: `ZIGZAG-${p}`, conf: 0.72, score: p };
+    }
+    return null;
+}
+
 // ========================================================================
-// 8. REGISTRY - 16 ALGOS
+// 8. REGISTRY
 // ========================================================================
 const ALGO_REGISTRY = [
     { id: 'bet', fn: algoBet, base: 1.0, family: 'streak' },
@@ -515,11 +541,36 @@ const ALGO_REGISTRY = [
     { id: 'lz', fn: algoLZSimilarity, base: 1.0, family: 'similarity' },
     { id: 'mtf', fn: algoMultiTF, base: 1.05, family: 'multi-tf' },
     { id: 'fractal', fn: algoFractal, base: 1.1, family: 'fractal' },
-    { id: 'subseq', fn: algoSubsequence, base: 1.0, family: 'subseq' }
+    { id: 'subseq', fn: algoSubsequence, base: 1.0, family: 'subseq' },
+    { id: 'mirror', fn: algoMirror, base: 1.1, family: 'mirror' },
+    { id: 'zigzag', fn: algoZigzag, base: 1.1, family: 'zigzag' }
 ];
 
 // ========================================================================
-// 9. WEIGHT (NEURAL - ĐỐI XỨNG)
+// 9. MIRROR TEST — kiểm tra algo có thiên vị không
+// ========================================================================
+function mirrorTest(algoFn, seq, sums) {
+    try {
+        // Chạy algo với sequence gốc
+        const orig = algoFn(seq, sums);
+        // Chạy algo với sequence flip (T↔X)
+        const flipped = algoFn(flipSeq(seq), sums);
+        // Nếu 1 bên null và bên kia có → algo KHÔNG đối xứng → loại
+        if ((orig === null) !== (flipped === null)) return { valid: false, reason: 'ASYMMETRIC_NULL' };
+        if (!orig || !flipped) return { valid: true };
+        // Nếu cả 2 cùng predict → phải là 2 code ĐỐI NHAU
+        const expectedFlipped = flip(orig.code);
+        if (flipped.code !== expectedFlipped) {
+            return { valid: false, reason: 'ASYMMETRIC_CODE', orig: orig.code, flipped: flipped.code, expected: expectedFlipped };
+        }
+        return { valid: true };
+    } catch (e) {
+        return { valid: false, reason: 'ERROR' };
+    }
+}
+
+// ========================================================================
+// 10. WEIGHT
 // ========================================================================
 function getWeight(db, algoId, baseWeight) {
     const learned = db.weights[algoId];
@@ -532,7 +583,7 @@ function updateWeight(db, algoId, wasCorrect, lr = 0.03) {
 }
 
 // ========================================================================
-// 10. CALIBRATION ĐỐI XỨNG (tách riêng T và X)
+// 11. CALIBRATION
 // ========================================================================
 function getCalibration(db, side, rawConf) {
     const list = db.calibration[side] || [];
@@ -554,44 +605,40 @@ function updateCalibration(db, side, rawConf, wasCorrect) {
 }
 
 // ========================================================================
-// 11. BIAS DETECTOR — CHỈ CẢNH BÁO, KHÔNG ÉP
+// 12. BIAS AUDITOR RUNTIME
 // ========================================================================
-function detectBias(db) {
-    // Kiểm tra lịch sử dự đoán của mô hình
-    const recent = db.history.slice(-60).filter(h => h.DU_DOAN_CODE);
-    if (recent.length < 15) return { biased: false };
-
-    const predT = recent.filter(h => h.DU_DOAN_CODE === 'T').length;
-    const predX = recent.filter(h => h.DU_DOAN_CODE === 'X').length;
-
-    // Kiểm tra actual outcome
-    const actualT = recent.filter(h => h.ketQua === 'T').length;
-    const actualX = recent.filter(h => h.ketQua === 'X').length;
-
-    const predBias = Math.abs(predT - predX) / Math.max(predT + predX, 1);
-    const actualBias = Math.abs(actualT - actualX) / Math.max(actualT + actualX, 1);
-
-    // Model thiên vị khi dự đoán lệch > 50% trong khi actual gần cân bằng
-    if (predBias > 0.5 && actualBias < 0.2) {
+function auditBias(db) {
+    // Lấy 20 phiên gần nhất
+    const recent = (db.recentVotes || []).slice(-20);
+    if (recent.length < 10) return { biased: false, action: 'NONE' };
+    const t = recent.filter(v => v === 'T').length;
+    const x = recent.filter(v => v === 'X').length;
+    const ratio = Math.max(t, x) / recent.length;
+    if (ratio >= 0.85) {
         return {
             biased: true,
-            predBias: +predBias.toFixed(2),
-            actualBias: +actualBias.toFixed(2),
-            warning: `Model dự đoán lệch ${(predBias * 100).toFixed(0)}% (T:${predT} X:${predX}) trong khi actual cân bằng`
+            dominant: t > x ? 'T' : 'X',
+            tCount: t, xCount: x,
+            action: 'FORCE_REBALANCE',
+            warning: `Model vote ${(ratio * 100).toFixed(0)}% về ${t > x ? 'Tài' : 'Xỉu'} trong ${recent.length} phiên gần nhất`
         };
     }
-    return {
-        biased: false,
-        predBias: +predBias.toFixed(2),
-        actualBias: +actualBias.toFixed(2),
-        predT, predX, actualT, actualX
-    };
+    if (ratio >= 0.75) {
+        return {
+            biased: true,
+            dominant: t > x ? 'T' : 'X',
+            tCount: t, xCount: x,
+            action: 'SOFT_REBALANCE',
+            warning: `Model vote ${(ratio * 100).toFixed(0)}% về ${t > x ? 'Tài' : 'Xỉu'}`
+        };
+    }
+    return { biased: false, tCount: t, xCount: x, action: 'NONE' };
 }
 
 // ========================================================================
-// 12. META ENGINE V4 — CÂN BẰNG TUYỆT ĐỐI
+// 13. META ENGINE V6
 // ========================================================================
-function runMetaEngine(seq, sums, db) {
+function runMetaEngine(seq, sums, db, session) {
     const regime = detectRegime(seq);
     db.regime = regime;
 
@@ -599,25 +646,32 @@ function runMetaEngine(seq, sums, db) {
     const details = [];
     const families = { T: new Set(), X: new Set() };
     const entropy30 = entropy(seq.slice(-30));
+    const mirrorRejects = [];
 
     for (const algo of ALGO_REGISTRY) {
+        // ============================================
+        // MIRROR TEST: chỉ chấp nhận algo đối xứng
+        // ============================================
+        const test = mirrorTest(algo.fn, seq, sums);
+        if (!test.valid) {
+            mirrorRejects.push({ id: algo.id, reason: test.reason });
+            continue; // BỎ QUA algo bias
+        }
+
         let res = null;
         try { res = algo.fn(seq, sums, db); } catch (e) { res = null; }
         if (!res || !res.code) continue;
 
         const w = getWeight(db, algo.id, algo.base);
-        // Base vote = conf * weight (ĐỐI XỨNG cho cả 2 bên)
         let vote = (res.conf || 0.6) * w;
-
-        // Entropy penalty đối xứng
         const pen = entropy30 > 0.95 ? 0.7 : 1.0;
 
-        // Regime bonus — chỉ thưởng cho family phù hợp, không ép sang bên nào
+        // Regime bonus đối xứng
         let regimeBonus = 1.0;
         if (regime.regime === 'STREAKING' && (algo.family === 'streak' || algo.family === 'block')) regimeBonus = 1.2;
-        if (regime.regime === 'BOUNCING' && (algo.family === 'bounce' || algo.family === 'cycle')) regimeBonus = 1.2;
+        if (regime.regime === 'BOUNCING' && (algo.family === 'bounce' || algo.family === 'cycle' || algo.family === 'zigzag')) regimeBonus = 1.2;
         if (regime.regime === 'CHAOTIC' && (algo.family === 'markov' || algo.family === 'ngram')) regimeBonus = 0.85;
-        if (regime.regime === 'TRENDING' && (algo.family === 'motif' || algo.family === 'fractal')) regimeBonus = 1.15;
+        if (regime.regime === 'TRENDING' && (algo.family === 'motif' || algo.family === 'fractal' || algo.family === 'mirror')) regimeBonus = 1.15;
 
         const finalVote = vote * pen * regimeBonus;
         votes[res.code] += finalVote;
@@ -633,95 +687,92 @@ function runMetaEngine(seq, sums, db) {
     }
 
     const total = votes.T + votes.X;
+    let winner, confidence, pT, pX, gap, decisionPath;
 
-    // Nếu không có algo nào vote → CHỜ
-    if (total < 0.5) {
-        return {
-            code: null, label: 'CHỜ', tiLe: 'CHỜ', details,
-            regime, entropy: +entropy30.toFixed(3),
-            balance: { votesT: 0, votesX: 0, gap: 0 }
-        };
+    if (total < 0.01) {
+        const h = crypto.createHash('md5').update(String(session)).digest();
+        winner = (h[0] % 2 === 0) ? 'T' : 'X';
+        pT = 0.5; pX = 0.5; gap = 0; confidence = 0.5;
+        decisionPath = 'TIEBREAK-HASH';
+    } else {
+        pT = votes.T / total;
+        pX = votes.X / total;
+        gap = Math.abs(pT - pX);
+        if (gap < 0.0001) {
+            const h = crypto.createHash('md5').update(String(session)).digest();
+            winner = (h[0] % 2 === 0) ? 'T' : 'X';
+            confidence = 0.5;
+            decisionPath = 'TIEBREAK-HASH';
+        } else if (gap < 0.05) {
+            winner = pT > pX ? 'T' : 'X';
+            confidence = 0.5 + gap * 2;
+            decisionPath = 'WEAK-GAP';
+        } else {
+            winner = pT > pX ? 'T' : 'X';
+            confidence = Math.max(pT, pX);
+            decisionPath = 'NORMAL';
+        }
     }
 
-    // ==================================================
-    // CÂN BẰNG ĐỐI XỨNG: KHÔNG THIÊN VỊ
-    // ==================================================
-    const pT = votes.T / total;
-    const pX = votes.X / total;
-
-    // Gap = độ "lệch" giữa 2 bên (0 = hoàn toàn cân, 1 = hoàn toàn lệch)
-    const gap = Math.abs(pT - pX);
-
-    // Nếu gap quá nhỏ (< 0.08) → 2 bên gần như cân bằng, không đủ evidence
-    if (gap < 0.08) {
-        return {
-            code: null, label: 'CHỜ·BALANCED', tiLe: 'CHỜ', details,
-            regime, entropy: +entropy30.toFixed(3),
-            balance: { votesT: +votes.T.toFixed(2), votesX: +votes.X.toFixed(2), gap: +gap.toFixed(3), pT: +pT.toFixed(3), pX: +pX.toFixed(3) }
-        };
+    // ================================================================
+    // BIAS AUDITOR: nếu model vote lệch > 75% trong 20 phiên → rebalance
+    // ================================================================
+    const biasAudit = auditBias(db);
+    let biasForced = false;
+    if (biasAudit.action === 'FORCE_REBALANCE' && winner === biasAudit.dominant) {
+        // Đang bias + winner trùng với bên bias → ĐẢO (đối xứng: 1 lần đảo)
+        winner = flip(winner);
+        confidence = Math.max(0.5, confidence * 0.7); // Giảm confidence vì forced
+        decisionPath = 'BIAS-REBALANCE';
+        biasForced = true;
+    } else if (biasAudit.action === 'SOFT_REBALANCE' && winner === biasAudit.dominant) {
+        // Giảm confidence nhưng không đảo
+        confidence = confidence * 0.85;
     }
 
-    const winner = pT > pX ? 'T' : 'X';
-    const loser = winner === 'T' ? 'X' : 'T';
-    let confidence = Math.max(pT, pX);
-
-    // ==================================================
-    // DIVERSITY BONUS (áp dụng cho winner, không thiên vị bên nào)
-    // ==================================================
+    // Diversity bonus
     const winnerFamilies = families[winner].size;
-    if (winnerFamilies >= 4) confidence = clamp(confidence + 0.04, 0, 0.97);
-    if (winnerFamilies >= 6) confidence = clamp(confidence + 0.02, 0, 0.97);
+    if (winnerFamilies >= 4) confidence = clamp(confidence + 0.04, 0, 0.92);
+    if (winnerFamilies >= 6) confidence = clamp(confidence + 0.02, 0, 0.92);
 
-    // ==================================================
-    // CALIBRATION ĐỐI XỨNG — áp dụng riêng cho bên thắng
-    // ==================================================
+    // Calibration
     const calib = getCalibration(db, winner, confidence);
-    confidence = clamp(confidence * calib, 0, 0.97);
+    confidence = clamp(confidence * calib, 0, 0.92);
 
-    // ==================================================
-    // DYNAMIC THRESHOLD — đối xứng cho cả T và X
-    // ==================================================
-    let threshold = 0.60;
-    if (regime.regime === 'CHAOTIC') threshold = 0.70;
-    else if (regime.regime === 'MIXED') threshold = 0.64;
-    else if (regime.regime === 'TRENDING' || regime.regime === 'STREAKING') threshold = 0.58;
-
-    if (confidence < threshold) {
-        return {
-            code: null, label: `CHỜ·${regime.regime}`, tiLe: 'CHỜ', details,
-            regime, entropy: +entropy30.toFixed(3),
-            balance: { votesT: +votes.T.toFixed(2), votesX: +votes.X.toFixed(2), gap: +gap.toFixed(3), pT: +pT.toFixed(3), pX: +pX.toFixed(3), threshold }
-        };
-    }
-
-    // ==================================================
-    // ANTI-DOMINANCE: nếu bên thua có > 35% votes → confidence giảm
-    // (tránh chắc chắn T/X khi evidence phân tán)
-    // ==================================================
-    const loserShare = votes[loser] / total;
+    // Anti-dominance
+    const loser = flip(winner);
+    const loserShare = total > 0 ? votes[loser] / total : 0.5;
     let antiDomPenalty = 1.0;
     if (loserShare > 0.35) antiDomPenalty = 0.92;
     if (loserShare > 0.42) antiDomPenalty = 0.85;
-    confidence = clamp(confidence * antiDomPenalty, 0, 0.95);
+    confidence = clamp(confidence * antiDomPenalty, 0.5, 0.92);
 
-    // Nếu sau anti-dom mà vẫn không đủ threshold → CHỜ
-    if (confidence < threshold) {
-        return {
-            code: null, label: `CHỜ·PHÂN TÁN`, tiLe: 'CHỜ', details,
-            regime, entropy: +entropy30.toFixed(3),
-            balance: { votesT: +votes.T.toFixed(2), votesX: +votes.X.toFixed(2), gap: +gap.toFixed(3), pT: +pT.toFixed(3), pX: +pX.toFixed(3), threshold, antiDomPenalty }
-        };
-    }
+    // Đánh dấu weak
+    const isWeak = confidence < 0.62;
+    const isVeryWeak = confidence < 0.55;
 
     const topAlgo = details.filter(d => d.code === winner).sort((a, b) => b.vote - a.vote)[0];
+    let labelName;
+    if (decisionPath === 'TIEBREAK-HASH') labelName = 'META·TIEBREAK';
+    else if (decisionPath === 'BIAS-REBALANCE') labelName = `META·REBALANCE`;
+    else if (isVeryWeak) labelName = `META·RẤT YẾU`;
+    else if (isWeak) labelName = `META·YẾU${topAlgo ? '·' + topAlgo.name : ''}`;
+    else labelName = topAlgo ? `META·${topAlgo.name}` : 'META';
+
     return {
         code: winner,
-        label: topAlgo ? `META·${topAlgo.name}` : 'META',
+        label: labelName,
         tiLe: (confidence * 100).toFixed(1) + '%',
         details,
         regime,
         entropy: +entropy30.toFixed(3),
         diversity: winnerFamilies,
+        weak: isWeak,
+        veryWeak: isVeryWeak,
+        decisionPath,
+        biasForced,
+        biasAudit,
+        mirrorRejects,
         balance: {
             votesT: +votes.T.toFixed(2),
             votesX: +votes.X.toFixed(2),
@@ -734,7 +785,7 @@ function runMetaEngine(seq, sums, db) {
 }
 
 // ========================================================================
-// 13. UPDATE STATS (đối xứng)
+// 14. UPDATE STATS
 // ========================================================================
 function updateAllStats(db, prevRecord, actual) {
     if (!prevRecord || !actual) return;
@@ -750,7 +801,6 @@ function updateAllStats(db, prevRecord, actual) {
         }
         updateWeight(db, d.algo, d.code === actual, 0.03);
     }
-
     if (prevRecord.DU_DOAN_CODE) {
         const side = prevRecord.DU_DOAN_CODE;
         const rawConf = parseFloat(String(prevRecord.TI_LE).replace('%', '')) / 100;
@@ -759,7 +809,7 @@ function updateAllStats(db, prevRecord, actual) {
 }
 
 // ========================================================================
-// 14. FETCH
+// 15. FETCH
 // ========================================================================
 async function fetchApi(url) {
     for (let i = 0; i < 3; i++) {
@@ -776,7 +826,7 @@ async function fetchApi(url) {
 }
 
 // ========================================================================
-// 15. PROCESS GAME
+// 16. PROCESS GAME
 // ========================================================================
 async function processGame(game) {
     const url = game === 'md5' ? API_MD5 : API_TX;
@@ -801,8 +851,20 @@ async function processGame(game) {
         updateAllStats(db, prev, actual);
     }
 
-    const pred = runMetaEngine(seq, sums, db); // KHÔNG còn Balance Guard ép
+    const pred = runMetaEngine(seq, sums, db, session + 1);
     const regime = db.regime || { regime: 'UNKNOWN' };
+
+    // Lưu vote gần đây để audit bias
+    if (!db.recentVotes) db.recentVotes = [];
+    if (pred.code) db.recentVotes.push(pred.code);
+    if (db.recentVotes.length > 50) db.recentVotes = db.recentVotes.slice(-50);
+
+    // Lưu bias log
+    if (pred.biasForced && pred.biasAudit) {
+        if (!db.biasLog) db.biasLog = [];
+        db.biasLog.push({ ts: Date.now(), session, audit: pred.biasAudit });
+        if (db.biasLog.length > 30) db.biasLog = db.biasLog.slice(-30);
+    }
 
     db.history.push({
         phien: session,
@@ -812,7 +874,7 @@ async function processGame(game) {
         ketQuaLabel: label(getResult(latest)),
         phienDuDoan: session + 1,
         DU_DOAN_CODE: pred.code,
-        DU_DOAN: pred.code ? label(pred.code) : 'CHỜ',
+        DU_DOAN: pred.code ? label(pred.code) : null,
         TI_LE: pred.tiLe,
         patternName: pred.label,
         algoDetails: pred.details || [],
@@ -820,6 +882,10 @@ async function processGame(game) {
         regime: regime.regime,
         diversity: pred.diversity || 0,
         balance: pred.balance || null,
+        weak: pred.weak || false,
+        veryWeak: pred.veryWeak || false,
+        decisionPath: pred.decisionPath,
+        biasForced: pred.biasForced || false,
         trangThai: 'ĐANG CHỜ'
     });
 
@@ -831,18 +897,19 @@ async function processGame(game) {
 setInterval(() => { processGame('md5'); processGame('taixiu'); }, TICK_MS);
 
 // ========================================================================
-// 16. ROUTES
+// 17. ROUTES
 // ========================================================================
 app.get('/', (req, res) => {
     res.send(`
         <div style="font-family:sans-serif; padding:20px; background:#0a0e27; color:#e6eef6; min-height:100vh;">
-            <h2 style="color:#22c55e;">⚖️ META ENGINE V4 — CÂN BẰNG TUYỆT ĐỐI</h2>
-            <p>16 thuật toán · Không thiên vị · Không chắc Tài/Xỉu · Chỉ dự đoán khi đủ evidence</p>
+            <h2 style="color:#22c55e;">🎯 META ENGINE V6 — ANTI-BIAS + 18 ALGOS</h2>
+            <p>18 thuật toán · Mirror Test · Bias Auditor · Luôn dự đoán</p>
+            <p style="color:#fbbf24;">⚠️ Không bao giờ chắc Tài/Xỉu — confidence ≤ 92%</p>
             <ul style="line-height:1.8;">
                 <li><a href="/api/predict/md5" style="color:#60a5fa;">/api/predict/md5</a></li>
                 <li><a href="/api/predict/taixiu" style="color:#60a5fa;">/api/predict/taixiu</a></li>
                 <li><a href="/api/stats/md5" style="color:#60a5fa;">/api/stats/md5</a></li>
-                <li><a href="/api/bias/md5" style="color:#60a5fa;">/api/bias/md5</a> — Kiểm tra thiên vị</li>
+                <li><a href="/api/bias/md5" style="color:#60a5fa;">/api/bias/md5</a></li>
                 <li><a href="/api/health" style="color:#60a5fa;">/api/health</a></li>
                 <li><a href="/md5" style="color:#60a5fa;">/md5</a> · <a href="/taixiu" style="color:#60a5fa;">/taixiu</a></li>
             </ul>
@@ -856,64 +923,84 @@ app.get('/api/health', (req, res) => {
         const db = readDB(g);
         const settled = db.history.filter(h => h.trangThai === 'ĐÚNG' || h.trangThai === 'SAI');
         const correct = settled.filter(h => h.trangThai === 'ĐÚNG').length;
+        const recent = db.recentVotes || [];
+        const t = recent.filter(v => v === 'T').length;
+        const x = recent.filter(v => v === 'X').length;
         out[g] = {
             sessions: db.history.length,
             lastSession: db.lastProcessedSession,
-            regime: db.tr.regime?.regime || 'UNKNOWN',
-            recentWR: settled.length ? +(correct / settled.length * 100).toFixed(ang1) : null
+            regime: db.regime?.regime || 'UNKNOWN',
+            recentWR: settled.length ? +(correct / settled.length * 100).toFixed(1) : null,
+            voteBalance: { T: t, X: x, ratio: recent.length ? +(Math.max(t, x) / recent.length).toFixed(2) : null }
         };
     }
     res.json({ ok: true, ts: Date.now(), status: out });
 });
 
-appThai.get('/api/predict/:game', async (req, res) => {
+app.get('/api/predict/:game', async (req, res) => {
     const game = req.params.game;
-    if (game === !== 'md5' && game !== 'taixiu') return res.status(400).json({ success: false, error: 'Game không ' hợp lệ' });
+    if (game !== 'md5' && game !== 'taixiu') return res.status(400).json({ success: false, error: 'Game không hợp lệ' });
 
     const url = game === 'md5' ? API_MD5 : API_TX;
     const list = await fetchApi(url);
-    if (!list ||Đ !list.length) return res.status(500).json({ success: false, error: 'Không lấy được dữ liệu' });
+    if (!list || !list.length) return res.status(500).json({ success: false, error: 'Không lấy được dữ liệu' });
 
-    const latest = list[list.length -Ú 1];
+    const latest = list[list.length - 1];
     const session = safeInt(latest.SessionId);
     const seq = list.map(getResult).filter(Boolean);
-    const sums = listNG.map(getSum).filter(s => s >= 3 && s <= 18);
+    const sums = list.map(getSum).filter(s => s >= 3 && s <= 18);
 
     const db = readDB(game);
-    const pred = runMetaEngine(seq', sums, db);
+    const pred = runMetaEngine(seq, sums, db, session + 1);
 
     res.json({
         success: true,
         game, phien: session,
-        xucXac: getDice ||(latest), tong: getSum(latest),
+        xucXac: getDice(latest), tong: getSum(latest),
         ketQua: getResult(latest), ketQuaLabel: label(getResult(latest)),
-        ph hienDuDoan: session + 1,
-        duDoan: pred.code ? label(pred.code) : 'CHỜ',
+        phienDuDoan: session + 1,
+        duDoan: label(pred.code),
         duDoanCode: pred.code,
-        tiLe: pred.t.triLe,
+        tiLe: pred.tiLe,
         reason: pred.label,
         regime: pred.regime,
         entropy: pred.entropy,
-        diversity:ang pred.diversity,
-        balance: pred.balance, // ← QUAN TRỌNG: cho client biết votes T vs X
-        algoVotes: pred.dThaietails
+        diversity: pred.diversity,
+        weak: pred.weak,
+        veryWeak: pred.veryWeak,
+        decisionPath: pred.decisionPath,
+        biasForced: pred.biasForced,
+        biasAudit: pred.biasAudit,
+        mirrorRejects: pred.mirrorRejects,
+        balance: pred.balance,
+        algoVotes: pred.details
     });
 });
 
 app.get('/api/bias/:game', (req, res) => {
     const game = req.params.game;
-    if (game !== === 'md5' && game !== 'taixiu') return res.status(400).json({ success: false });
+    if (game !== 'md5' && game !== 'taixiu') return res.status(400).json({ success: false });
     const db = readDB(game);
-    res.json({ success: true, game, bias: detectBias(db) });
+    const audit = auditBias(db);
+    const recent = (db.recentVotes || []).slice(-30);
+    const t = recent.filter(v => v === 'T').length;
+    const x = recent.filter(v => v === 'X').length;
+    res.json({
+        success: true, game,
+        audit,
+        recentVotes: { T: t, X: x, total: recent.length },
+        biasLog: (db.biasLog || []).slice(-10),
+        recentSequence: recent
+    });
 });
 
-app.get '('/api/stats/:game', (req, res) => {
+app.get('/api/stats/:game', (req, res) => {
     const game = req.params.game;
-    if (game !== 'md5' && gameSA !== 'taixiu') return res.status(400).json({ success: false });
+    if (game !== 'md5' && game !== 'taixiu') return res.status(400).json({ success: false });
     const db = readDB(game);
 
     const stats = {};
-I    for (const id in db.algoStats) {
+    for (const id in db.algoStats) {
         const s = db.algoStats[id];
         stats[id] = {
             ...s,
@@ -925,18 +1012,29 @@ I    for (const id in db.algoStats) {
     const recent = db.history.slice(-100);
     const settled = recent.filter(h => h.trangThai === 'ĐÚNG' || h.trangThai === 'SAI');
     const correct = settled.filter(h => h.trangThai === 'ĐÚNG').length;
-    const skip = recent.filter(h => !h.DU_DOAN_CODE).length;
+    const weak = recent.filter(h => h.weak).length;
+    const veryWeak = recent.filter(h => h.veryWeak).length;
+
+    const strongSettled = settled.filter(h => !h.weak);
+    const weakSettled = settled.filter(h => h.weak);
+    const strongWR = strongSettled.length ? (strongSettled.filter(h => h.trangThai === 'ĐÚNG').length / strongSettled.length * 100).toFixed(1) : null;
+    const weakWR = weakSettled.length ? (weakSettled.filter(h => h.trangThai === 'ĐÚNG').length / weakSettled.length * 100).toFixed(1) : null;
+
+    // Đếm dự đoán T vs X
+    const predT = recent.filter(h => h.DU_DOAN_CODE === 'T').length;
+    const predX = recent.filter(h => h.DU_DOAN_CODE === 'X').length;
 
     res.json({
         success: true, game,
         overall: {
             total: settled.length, correct,
             accuracy: settled.length ? +(correct / settled.length * 100).toFixed(1) : 0,
-            skipped: skip,
-            skipRate: recent.length ? +(skip / recent.length * 100).toFixed(1) : 0
+            weakCount: weak, veryWeakCount: veryWeak
         },
+        split: { strongWR, weakWR, strongCount: strongSettled.length, weakCount: weakSettled.length },
+        predictions: { T: predT, X: predX, balance: predT + predX ? +(Math.abs(predT - predX) / (predT + predX)).toFixed(2) : 0 },
         regime: db.regime,
-        bias: detectBias(db),
+        bias: auditBias(db),
         perAlgo: stats
     });
 });
@@ -952,7 +1050,7 @@ app.get('/api/history/all', (req, res) => {
                 duDoanCode: it.DU_DOAN_CODE, duDoan: it.DU_DOAN, tiLe: it.TI_LE,
                 pattern: { type: it.patternName }, trangThai: it.trangThai,
                 entropy: it.entropy, regime: it.regime, diversity: it.diversity,
-                balance: it.balance
+                weak: it.weak, biasForced: it.biasForced, balance: it.balance
             }))
         };
     }
@@ -960,7 +1058,7 @@ app.get('/api/history/all', (req, res) => {
 });
 
 // ========================================================================
-// 17. WEB UI V4
+// 18. WEB UI
 // ========================================================================
 app.get('/:game', (req, res) => {
     const game = req.params.game;
@@ -968,14 +1066,20 @@ app.get('/:game', (req, res) => {
 
     const db = readDB(game);
     const rows = db.history.slice(-50).reverse();
-    const settled = db.history.filter(h => h');
+    const settled = db.history.filter(h => h.trangThai === 'ĐÚNG' || h.trangThai === 'SAI');
     const correct = settled.filter(h => h.trangThai === 'ĐÚNG').length;
     const accuracy = settled.length ? (correct / settled.length * 100).toFixed(1) : '0.0';
-    const totalRecent = Math.min(50, db.history.length);
-    const skipped = db.history.slice(-50).filter(h => !h.DU_DOAN_CODE).length;
-    const skipRate = totalRecent ? (skipped / totalRecent * 100).toFixed(1) : '0.0';
+
+    const strongSettled = settled.filter(h => !h.weak);
+    const weakSettled = settled.filter(h => h.weak);
+    const strongWR = strongSettled.length ? (strongSettled.filter(h => h.trangThai === 'ĐÚNG').length / strongSettled.length * 100).toFixed(1) : '-';
+    const weakWR = weakSettled.length ? (weakSettled.filter(h => h.trangThai === 'ĐÚNG').length / weakSettled.length * 100).toFixed(1) : '-';
+
     const regime = db.regime?.regime || 'UNKNOWN';
-    const bias = detectBias(db);
+    const audit = auditBias(db);
+    const recent = (db.recentVotes || []).slice(-30);
+    const tCnt = recent.filter(v => v === 'T').length;
+    const xCnt = recent.filter(v => v === 'X').length;
 
     const regimeColor = {
         STREAKING: '#f59e0b', BOUNCING: '#3b82f6', CHAOTIC: '#ef4444',
@@ -984,7 +1088,9 @@ app.get('/:game', (req, res) => {
 
     const getBadge = (type) => {
         if (!type) return 'badge-default';
-        if (/CHỜ/.test(type)) return 'badge-wait';
+        if (/YẾU|TIEBREAK|REBALANCE/.test(type)) return 'badge-weak';
+        if (/MIRROR/.test(type)) return 'badge-mirror';
+        if (/ZIGZAG/.test(type)) return 'badge-zigzag';
         if (/BỆT|STREAK/.test(type)) return 'badge-bet';
         if (/MARKOV|NGRAM|TRANS/.test(type)) return 'badge-markov';
         if (/CYCLE|PALIN|FLIP/.test(type)) return 'badge-cycle';
@@ -1000,14 +1106,18 @@ app.get('/:game', (req, res) => {
     <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-    <title>META V4 - ${game.toUpperCase()}</title>
+    <title>META V6 - ${game.toUpperCase()}</title>
     <style>
       *{box-sizing:border-box}
       body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0e27;color:#e6eef6;padding:12px;margin:0;}
       .header{background:linear-gradient(135deg,#7c3aed,#3b82f6,#10b981);padding:16px;border-radius:14px;margin-bottom:14px;box-shadow:0 8px 24px rgba(124,58,237,.4);text-align:center;}
       h1{color:#fff;font-size:20px;margin:0;font-weight:800;text-transform:uppercase}
       .stat-line{margin-top:8px;font-size:13px;color:#fff}
+      .split{display:flex;gap:8px;margin-top:8px;justify-content:center;font-size:12px}
+      .split > div{background:rgba(0,0,0,.25);padding:6px 10px;border-radius:8px;}
       .regime{display:inline-block;padding:4px 10px;border-radius:6px;background:${regimeColor};color:#fff;font-weight:700;font-size:11px;margin-top:6px;}
+      .balance{background:rgba(0,0,0,.25);padding:8px;border-radius:8px;margin-top:8px;font-size:12px}
+      .balance-bar{display:inline-block;height:8px;border-radius:2px;vertical-align:middle;}
       .bias-warn{background:#7f1d1d;color:#fecaca;padding:8px;border-radius:8px;margin-top:8px;font-size:12px;}
       .bias-ok{background:#14532d;color:#bbf7d0;padding:8px;border-radius:8px;margin-top:8px;font-size:12px;}
       .table-wrap{background:#0f172a;border-radius:12px;overflow-x:auto;border:1px solid #334155;}
@@ -1020,6 +1130,8 @@ app.get('/:game', (req, res) => {
       .sum{display:inline-block;padding:4px 10px;border-radius:6px;background:#334155;color:#fbbf24;font-weight:800;font-size:14px}
       .session{font-family:monospace;font-size:11px;color:#64748b}
       .ti-le{font-size:12px;color:#cbd5e1;font-weight:600}
+      .ti-le.weak{color:#fbbf24;background:#78350f;padding:2px 6px;border-radius:4px;}
+      .ti-le.veryweak{color:#fca5a5;background:#7f1d1d;padding:2px 6px;border-radius:4px;}
       .badge{display:inline-block;padding:4px 8px;border-radius:6px;font-size:10px;font-weight:700;white-space:nowrap;}
       .badge-bet{background:#78350f;color:#fcd34d}
       .badge-markov{background:#1e3a8a;color:#93c5fd}
@@ -1028,20 +1140,30 @@ app.get('/:game', (req, res) => {
       .badge-mtf{background:#7c2d12;color:#fdba74}
       .badge-fractal{background:#4c1d95;color:#c4b5fd}
       .badge-subseq{background:#0c4a6e;color:#7dd3fc}
-      .badge-wait{background:#334155;color:#94a3b8}
+      .badge-mirror{background:#831843;color:#f9a8d4}
+      .badge-zigzag{background:#365314;color:#bef264}
+      .badge-weak{background:#78350f;color:#fef3c7}
       .badge-default{background:#334155;color:#cbd5e1}
-      .balance-bar{display:inline-block;height:8px;background:#22c55e;border-radius:2px;vertical-align:middle;margin-right:2px}
     </style>
     <script>setTimeout(()=>location.reload(), 10000);</script>
     </head>
     <body>
       <div class="header">
-        <h1>⚖️ META ENGINE V4 · ${game.toUpperCase()}</h1>
-        <div class="stat-line">Chính xác: <strong>${accuracy}%</strong> (${settled.length} phiên) · Bỏ qua: <strong>${skipRate}%</strong></div>
+        <h1>🎯 META ENGINE V6 · ${game.toUpperCase()}</h1>
+        <div class="stat-line">Tổng chính xác: <strong>${accuracy}%</strong> (${settled.length} phiên)</div>
+        <div class="split">
+          <div>🔥 Mạnh: <strong>${strongWR}%</strong> (${strongSettled.length})</div>
+          <div>⚠️ Yếu: <strong>${weakWR}%</strong> (${weakSettled.length})</div>
+        </div>
         <div class="regime">REGIME: ${regime}</div>
-        ${bias.biased
-            ? `<div class="bias-warn">⚠️ ${bias.warning}</div>`
-            : `<div class="bias-ok">✅ Không thiên vị · T dự đoán ${bias.predT ?? 0} · X dự đoán ${bias.predX ?? 0}</div>`}
+        <div class="balance">
+          Vote 30 phiên: <strong style="color:#22c55e">Tài ${tCnt}</strong> ·
+          <strong style="color:#ef4444">Xỉu ${xCnt}</strong>
+          ${tCnt + xCnt ? `<span class="balance-bar" style="width:${tCnt / (tCnt + xCnt) * 100}px;background:#22c55e"></span><span class="balance-bar" style="width:${xCnt / (tCnt + xCnt) * 100}px;background:#ef4444"></span>` : ''}
+        </div>
+        ${audit.biased
+            ? `<div class="bias-warn">⚠️ ${audit.warning}</div>`
+            : `<div class="bias-ok">✅ Cân bằng · Không thiên vị</div>`}
       </div>
       <div class="table-wrap">
         <table>
@@ -1052,16 +1174,16 @@ app.get('/:game', (req, res) => {
             ${rows.map(it => {
               const dice = (it.xucXac || []).join('-').replace(/-/g, '-<br>');
               const kqCls = it.ketQua === 'T' ? 'tai' : (it.ketQua === 'X' ? 'xiu' : '');
-              const isWait = !it.DU_DOAN_CODE;
-              const ddCls = isWait ? 'cho' : (it.DU_DOAN_CODE === 'T' ? 'tai' : 'xiu');
+              const ddCls = it.DU_DOAN_CODE === 'T' ? 'tai' : (it.DU_DOAN_CODE === 'X' ? 'xiu' : 'cho');
               const ttCls = it.trangThai === 'ĐÚNG' ? 'dung' : (it.trangThai === 'SAI' ? 'sai' : 'cho');
               const ttText = it.trangThai === 'ĐANG CHỜ' ? '...' : (it.trangThai || '');
               const badgeCls = getBadge(it.patternName);
+              const tiLeCls = it.veryWeak ? 'veryweak' : (it.weak ? 'weak' : '');
               return `<tr>
                 <td class="session">${it.phien}</td><td class="dice">${dice}</td>
                 <td><span class="sum">${it.tong || ''}</span></td><td class="${kqCls}">${it.ketQuaLabel || ''}</td>
-                <td class="session">${it.phienDuDoan}</td><td class="${ddCls}">${isWait ? 'CHỜ' : it.DU_DOAN}</td>
-                <td class="ti-le">${it.TI_LE || 'CHỜ'}</td>
+                <td class="session">${it.phienDuDoan}</td><td class="${ddCls}">${it.DU_DOAN || ''}${it.biasForced ? ' 🔄' : ''}</td>
+                <td><span class="ti-le ${tiLeCls}">${it.TI_LE}</span></td>
                 <td>${it.patternName ? `<span class="badge ${badgeCls}">${it.patternName}</span>` : '-'}</td>
                 <td class="${ttCls}">${ttText}</td>
               </tr>`;
@@ -1075,6 +1197,6 @@ app.get('/:game', (req, res) => {
 });
 
 // ========================================================================
-// 18. START
+// 19. START
 // ========================================================================
-app.listen(PORT, () => console.log(`⚖️ META ENGINE V4 chạy port ${PORT}`));
+app.listen(PORT, () => console.log(`🎯 META ENGINE V6 chạy port ${PORT}`));
