@@ -26,20 +26,23 @@ app.use(express.json({ limit: '50mb' }));
 const CONFIG = {
     PORT: process.env.PORT || 3000,
     HOST: '0.0.0.0',
-    API: {
-        // SỬA DOMAIN TẠI ĐÂY NẾU CẦN (Dựa theo ảnh bạn chụp là ixiumaksh...)
-        MD5: 'https://ixiu.maksh3979madfw.com/api/md5luckydice/GetSoiCau',
-        TAIXIU: 'https://ixiu.maksh3979madfw.com/api/luckydice/GetSoiCau'
-    },
+    // Mảng chứa các domain có thể dùng để tự động fallback
+    API_DOMAINS: [
+        'https://ixiu.maksh3979madfw.com',
+        'https://taixiu.maksh3979madfw.com',
+        'https://taixiumd5.maksh3979madfw.com'
+    ],
     DB_DIR: process.env.DB_DIR || (fs.existsSync('/data') ? '/data' : (process.env.RENDER ? '/tmp' : path.join(__dirname, 'db_v31'))),
-    TICK_MS: 12000, // Tăng lên 12s để tránh bị block IP
-    VERSION: 'V31.1.0-TXTX-PRODUCTION'
+    TICK_MS: 10000, // 10 giây quét 1 lần
+    VERSION: 'V31.2.0-TXTX-RENDER-PRO'
 };
 
+// Khởi tạo thư mục DB
 if (!fs.existsSync(CONFIG.DB_DIR)) {
-    try { fs.mkdirSync(CONFIG.DB_DIR, { recursive: true }); } catch (e) { console.error('[DB DIR ERROR]', e.message); }
+    try { fs.mkdirSync(CONFIG.DB_DIR, { recursive: true }); } catch (e) {}
 }
 
+// Bắt lỗi toàn cục (Không để server crash)
 process.on('uncaughtException', (err) => console.error('[FATAL EXCEPTION]', err.message));
 process.on('unhandledRejection', (reason) => console.error('[FATAL REJECTION]', reason));
 
@@ -58,7 +61,6 @@ class MathUtils {
         return Number(Math.round(val + 'e' + decimals) + 'e-' + decimals);
     }
     static logWeight(val, base = 2) {
-        // FIX: Đảm bảo val > 0 để không bị âm vô cực
         return Math.log(Math.max(0.1, val)) / Math.log(base);
     }
 }
@@ -83,7 +85,6 @@ class Core {
         return (s >= 3 && s <= 18) ? (s >= 11 ? 'T' : 'X') : null;
     }
 
-    // FIX: Thuật toán Levenshtein tối ưu (chỉ dùng khi thực sự cần sai số 1)
     static levenshteinDistance(str1, str2) {
         if (str1 === str2) return 0;
         if (str1.length === 0) return str2.length;
@@ -122,11 +123,10 @@ class DB {
                     algoStats: parsed.algoStats || {}
                 };
             }
-        } catch (e) { console.error('[DB LOAD ERROR]', e.message); }
+        } catch (e) {}
         return { history: [], lastSession: null, algoStats: {} };
     }
     
-    // FIX: Ghi file Atomic (tránh hỏng file nếu process bị kill giữa chừng)
     static save(game, db) {
         const file = this.getFilePath(game);
         const tmp = file + '.tmp';
@@ -141,60 +141,43 @@ class DB {
 // [MODULE 6] BỘ LỌC NHIỄU (NOISE FILTER)
 // ========================================================================
 class NoiseFilter {
-    // FIX: Nới lỏng điều kiện từ 90% xuống 70% (cho phép 2-3 nhịp gãy)
     static isPureTXTX(seq, lookback = 10) {
         if (seq.length < lookback) return false;
         const recent = seq.slice(-lookback);
         let alternatingCount = 0;
         for (let i = 1; i < recent.length; i++) {
-            if (recent[i] !== recent[i - 1]) {
-                alternatingCount++;
-            }
+            if (recent[i] !== recent[i - 1]) alternatingCount++;
         }
-        // Nếu tỷ lệ đảo >= 70% thì chấp nhận
+        // Cho phép sai số nhịp (>=70% là đảo liên tục)
         return (alternatingCount / (lookback - 1)) >= 0.70;
     }
 }
 
 // ========================================================================
-// [MODULE 7] ĐỘNG CƠ TXTX CHUYÊN SÂU
+// [MODULE 7] ĐỘNG CƠ TXTX
 // ========================================================================
 class TXTXEngine {
-    // 1. Markov 1-1 (Đảo trạng thái)
     static markovTXTX(seq) {
         if (seq.length < 10) return null;
         const last = seq[seq.length - 1];
-        let countFlip = 0, countKeep = 0;
-        
+        let countFlip = 0;
         for (let i = seq.length - 10; i < seq.length; i++) {
             if (seq[i] !== seq[i - 1]) countFlip++;
-            else countKeep++;
         }
-        
-        if (countFlip >= 7) { // FIX: Nới lỏng từ 8 xuống 7
-            return {
-                code: Core.flip(last),
-                name: 'TXTX-MARKOV',
-                conf: 0.82,
-                id: 'tx_markov'
-            };
+        if (countFlip >= 7) {
+            return { code: Core.flip(last), name: 'TXTX-MARKOV', conf: 0.82, id: 'tx_markov' };
         }
         return null;
     }
 
-    // 2. Đệ quy tìm chuỗi TXTX (Sliding Window)
     static recursiveTXTX(seq, windowSize = 6) {
         if (seq.length < windowSize + 5) return null;
         const target = seq.slice(-windowSize).join('');
-        
         let tCount = 0, xCount = 0, occurrences = 0;
 
         for (let i = 0; i <= seq.length - windowSize - 1; i++) {
             const sub = seq.slice(i, i + windowSize).join('');
-            // FIX: Thực sự dùng Levenshtein dist <= 1 thay vì chỉ dist === 0
-            const dist = Core.levenshteinDistance(sub, target);
-            
-            if (dist <= 1) { 
+            if (Core.levenshteinDistance(sub, target) <= 1) { 
                 occurrences++;
                 if (seq[i + windowSize] === 'T') tCount++;
                 else xCount++;
@@ -204,46 +187,29 @@ class TXTXEngine {
         if (occurrences >= 1) {
             const conf = Math.max(tCount, xCount) / occurrences;
             if (conf >= 0.60) {
-                return {
-                    code: tCount > xCount ? 'T' : 'X',
-                    name: `TXTX-EXACT`,
-                    conf: conf,
-                    id: 'tx_exact'
-                };
+                return { code: tCount > xCount ? 'T' : 'X', name: `TXTX-EXACT`, conf: conf, id: 'tx_exact' };
             }
         }
         return null;
     }
 
-    // 3. Phân tích độ lệch (Deviation)
     static deviationAnalysis(seq) {
         if (seq.length < 8) return null;
         const last4 = seq.slice(-4).join('');
         if (last4 === 'TXXT' || last4 === 'XTTX') {
-            return {
-                code: Core.flip(seq[seq.length - 1]),
-                name: 'TXTX-SỬA LỖI',
-                conf: 0.75,
-                id: 'tx_fix'
-            };
+            return { code: Core.flip(seq[seq.length - 1]), name: 'TXTX-SỬA LỖI', conf: 0.75, id: 'tx_fix' };
         }
         return null;
     }
 }
 
 // ========================================================================
-// [MODULE 8] META ENGINE (TỔNG HỢP & HỌC MÁY TXTX)
+// [MODULE 8] META ENGINE (TỔNG HỢP)
 // ========================================================================
 class MetaEngine {
     static analyze(seq, db) {
         if (!NoiseFilter.isPureTXTX(seq, 10)) {
-            return {
-                code: null,
-                label: 'NHIỄU - BỎ QUA',
-                tiLe: '0.0%',
-                weak: true,
-                details: []
-            };
+            return { code: null, label: 'NHIỄU - BỎ QUA', tiLe: '0.0%', weak: true, details: [] };
         }
 
         const candidates = [
@@ -258,10 +224,7 @@ class MetaEngine {
                 label: 'TXTX-CƠ BẢN',
                 tiLe: '60.0%',
                 weak: false,
-                details: [{
-                    algo: 'tx_basic', family: 'txtx', code: Core.flip(seq[seq.length - 1]),
-                    name: 'TXTX-MẶC ĐỊNH', conf: 0.60, vote: 0.60
-                }]
+                details: [{ algo: 'tx_basic', family: 'txtx', code: Core.flip(seq[seq.length - 1]), name: 'TXTX-MẶC ĐỊNH', conf: 0.60, vote: 0.60 }]
             };
         }
 
@@ -270,24 +233,15 @@ class MetaEngine {
 
         for (const algo of candidates) {
             const stats = db.algoStats?.[algo.id] || { weight: 1.0, loseStreak: 0, winStreak: 0 };
-            
             let weight = stats.weight || 1.0;
             if (stats.winStreak >= 2) weight *= 1.5;
-            // FIX: Không cho weight = 0, hạ xuống 0.1 để algo còn cơ hội hồi phục
             if (stats.loseStreak >= 2) weight = Math.max(0.1, weight * 0.5);
             
             const finalWeight = MathUtils.clamp(MathUtils.logWeight(weight + 1), 0.1, 2.5);
             const power = algo.conf * finalWeight;
 
             votes[algo.code] += power;
-            details.push({
-                algo: algo.id,
-                family: 'txtx',
-                code: algo.code,
-                name: algo.name,
-                conf: MathUtils.round(algo.conf, 3),
-                vote: MathUtils.round(power, 3)
-            });
+            details.push({ algo: algo.id, family: 'txtx', code: algo.code, name: algo.name, conf: MathUtils.round(algo.conf, 3), vote: MathUtils.round(power, 3) });
         }
 
         const totalVotes = votes.T + votes.X;
@@ -296,8 +250,6 @@ class MetaEngine {
         if (totalVotes < 0.1) {
             winner = Core.flip(seq[seq.length - 1]);
             confidence = 0.60;
-            // FIX: Cộng vote thật vào để stat lưu lại đúng
-            votes[winner] += 1;
             details.push({ algo: 'tx_fb', family: 'txtx', code: winner, name: 'TXTX-FALLBACK', conf: 0.60, vote: 1 });
         } else {
             const pT = votes.T / totalVotes;
@@ -320,55 +272,53 @@ class MetaEngine {
 }
 
 // ========================================================================
-// [MODULE 9] FETCHER & WORKER (ĐÃ FIX THEO ẢNH)
+// [MODULE 9] FETCHER THÔNG MINH (TỰ ĐỘNG ĐỔI DOMAIN)
 // ========================================================================
+let activeDomainIndex = 0; // Lưu domain đang hoạt động
+
 class Fetcher {
     static async getData(game) {
-        const targetUrl = game === 'md5' ? CONFIG.API.MD5 : CONFIG.API.TAIXIU;
-        
-        for (let i = 0; i < 3; i++) {
+        // Thử tối đa 3 domain nếu domain hiện tại lỗi
+        for (let attempt = 0; attempt < CONFIG.API_DOMAINS.length; attempt++) {
+            // Xoay vòng domain
+            const currentDomain = CONFIG.API_DOMAINS[activeDomainIndex];
+            const pathApi = game === 'md5' ? '/api/md5luckydice/GetSoiCau' : '/api/luckydice/GetSoiCau';
+            const targetUrl = `${currentDomain}${pathApi}`;
+
             try {
                 const res = await axios.get(targetUrl, { 
-                    timeout: 15000,
+                    timeout: 12000,
                     headers: { 
                         'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
                         'Accept': 'application/json, text/plain, */*'
                     }
                 });
 
-                // FIX: Parse JSON linh hoạt theo đúng ảnh chụp
                 let arr = [];
                 let data = res.data;
-
-                if (Array.isArray(data)) {
-                    arr = data;
-                } else if (data && data.data && Array.isArray(data.data)) {
-                    arr = data.data;
-                } else if (data && data.data && data.data.list) {
-                    arr = data.data.list;
-                } else if (data && data.list) {
-                    arr = data.list;
-                }
+                if (Array.isArray(data)) arr = data;
+                else if (data && data.data && Array.isArray(data.data)) arr = data.data;
+                else if (data && data.data && data.data.list) arr = data.data.list;
 
                 if (Array.isArray(arr) && arr.length > 5) {
-                    // Dữ liệu ảnh: [0] mới nhất, [length-1] cũ nhất -> Đảo lại
-                    if (Number(arr[0].SessionId) > Number(arr[arr.length - 1].SessionId)) {
-                        arr.reverse(); 
-                    }
-                    console.log(`[FETCH OK] ${game.toUpperCase()}: Lấy được ${arr.length} phiên, mới nhất: ${arr[arr.length-1].SessionId}`);
+                    if (Number(arr[0].SessionId) > Number(arr[arr.length - 1].SessionId)) arr.reverse(); 
+                    console.log(`[FETCH OK] ${game.toUpperCase()} | Domain: ${currentDomain} | Phiên mới nhất: ${arr[arr.length-1].SessionId}`);
                     return arr;
-                } else {
-                    console.log(`[FETCH WARN] ${game.toUpperCase()}: Dữ liệu không hợp lệ hoặc rỗng`);
                 }
             } catch (e) {
-                console.error(`[FETCH FAIL] ${game.toUpperCase()} lần ${i+1}: ${e.message}`);
-                await new Promise(r => setTimeout(r, 2000));
+                console.error(`[FETCH FAIL] ${game.toUpperCase()} | Domain: ${currentDomain} | Lỗi: ${e.message}`);
+                // Đổi domain tiếp theo
+                activeDomainIndex = (activeDomainIndex + 1) % CONFIG.API_DOMAINS.length;
+                await new Promise(r => setTimeout(r, 1000));
             }
         }
-        return [];
+        return []; // Trả về rỗng nếu chết hết cả 3 domain
     }
 }
 
+// ========================================================================
+// [MODULE 10] WORKER (XỬ LÝ NGẦM)
+// ========================================================================
 class Worker {
     static async process(game) {
         try {
@@ -379,21 +329,17 @@ class Worker {
             const session = MathUtils.safeInt(latest.SessionId);
             const db = DB.load(game);
 
-            // FIX: Guard chặn phiên cũ chạy lại
             if (db.lastSession !== null && session <= db.lastSession) return;
 
             const seq = list.map(Core.getResult).filter(Boolean);
-
             const prev = db.history[db.history.length - 1];
             
-            // FIX: Xử lý session gap (Nếu API nhảy phiên)
+            // Cập nhật kết quả phiên trước
             if (prev && MathUtils.safeInt(prev.phienDuDoan) <= session) {
-                // Tìm kết quả thực tế của phiên đã dự đoán
                 const targetItem = list.find(x => MathUtils.safeInt(x.SessionId) === prev.phienDuDoan);
                 if (targetItem) {
                     const actual = Core.getResult(targetItem);
-                    prev.ketQua = actual; 
-                    prev.ketQuaLabel = Core.getLabel(actual);
+                    prev.ketQua = actual; prev.ketQuaLabel = Core.getLabel(actual);
                     prev.trangThai = prev.DU_DOAN_CODE === actual ? 'ĐÚNG' : 'SAI';
                     
                     if (!db.algoStats) db.algoStats = {};
@@ -410,8 +356,6 @@ class Worker {
                             stat.winStreak = 0;
                         }
                     }
-                } else {
-                    console.warn(`[WORKER WARN] Không tìm thấy kết quả phiên ${prev.phienDuDoan} trong list API`);
                 }
             }
 
@@ -427,16 +371,11 @@ class Worker {
 
             db.lastSession = session;
             DB.save(game, db);
-            
-            if (pred.code) {
-                console.log(`[PREDICT] ${game.toUpperCase()} - Phiên ${session+1}: ${Core.getLabel(pred.code)} (${pred.tiLe}) - ${pred.label}`);
-            }
         } catch (err) {
             console.error('[WORKER ERROR]', err.message);
         }
     }
 
-    // FIX: Dùng lock để tránh chạy chồng chéo nếu API phản hồi chậm
     static start() {
         let isProcessing = false;
         const run = async () => {
@@ -449,8 +388,7 @@ class Worker {
                 isProcessing = false;
             }
         };
-        
-        run(); // Chạy lần đầu
+        run(); 
         setInterval(run, CONFIG.TICK_MS);
     }
 }
@@ -458,11 +396,10 @@ class Worker {
 Worker.start();
 
 // ========================================================================
-// [MODULE 10] API ROUTES
+// [MODULE 11] GIAO DIỆN & API ROUTES
 // ========================================================================
 app.get('/', (req, res) => res.redirect('/history/md5'));
 
-// FIX: Đưa route /history lên trước route /:game để tránh xung đột
 app.get('/history/:game(md5|taixiu)', async (req, res) => {
     try {
         const game = req.params.game;
@@ -477,6 +414,14 @@ app.get('/history/:game(md5|taixiu)', async (req, res) => {
         const settled = db.history.filter(h => h.trangThai === 'ĐÚNG' || h.trangThai === 'SAI');
         const correct = settled.filter(h => h.trangThai === 'ĐÚNG').length;
         const acc = settled.length ? (correct / settled.length * 100).toFixed(1) : '0.0';
+
+        // Nếu DB rỗng (do API chết trên Render), hiển thị cảnh báo
+        const warningHtml = db.history.length === 0 ? `
+            <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid #ef4444; color: #ef4444; padding: 15px; border-radius: 8px; text-align: center; margin-bottom: 20px;">
+                <b>⚠️ CHƯA CÓ DỮ LIỆU</b><br>
+                <span style="font-size: 12px;">Hệ thống đang chờ API phản hồi. Nếu quá 1 phút vẫn trống, có thể IP của Render đã bị nhà cái chặn. Hãy xem Logs trên Render để kiểm tra.</span>
+            </div>
+        ` : '';
 
         const html = `<!DOCTYPE html>
         <html lang="vi">
@@ -515,6 +460,7 @@ app.get('/history/:game(md5|taixiu)', async (req, res) => {
                 <div class="acc">${acc}%</div>
                 <div style="font-size:12px; color:#888; margin-top:5px;">Tổng ${settled.length} phiên đã học</div>
             </div>
+            ${warningHtml}
             <div class="table-wrap">
                 <table>
                     <thead><tr><th>Phiên</th><th>XX</th><th>Tổng</th><th>KQ</th><th>Dự Đoán</th><th>Cầu</th><th>Trạng Thái</th></tr></thead>
@@ -550,8 +496,9 @@ app.get('/:game(md5|taixiu)', async (req, res) => {
         let list = await Fetcher.getData(game);
         let db = DB.load(game);
 
+        // Nếu không lấy được từ API, dùng tạm DB cũ để không bị sập API Endpoint
         if (!list || list.length < 10) {
-            if (db.history.length === 0) return res.status(503).json({ error: 'No Data' });
+            if (db.history.length === 0) return res.status(503).json({ error: 'No Data API blocked' });
             list = db.history.slice(-50).map(h => ({ 
                 SessionId: h.phien, 
                 FirstDice: h.xucXac[0]||1, 
@@ -583,12 +530,12 @@ app.get('/:game(md5|taixiu)', async (req, res) => {
 });
 
 // ========================================================================
-// [MODULE 11] KHỞI CHẠY SERVER
+// [MODULE 12] KHỞI CHẠY
 // ========================================================================
 app.listen(CONFIG.PORT, CONFIG.HOST, () => {
     console.log(`=======================================================`);
-    console.log(`🚀 ${CONFIG.VERSION} - ONLINE - PORT ${CONFIG.PORT}`);
-    console.log(`🌐 DB Path: ${CONFIG.DB_DIR}`);
-    console.log(`🎯 Chỉ tập trung vào cầu TXTX. Các cầu khác auto bỏ qua.`);
+    console.log(`🚀 ${CONFIG.VERSION} ONLINE - PORT ${CONFIG.PORT}`);
+    console.log(`🌐 DB DIR: ${CONFIG.DB_DIR}`);
+    console.log(`🎯 FOCUS: TXTX PATTERN ONLY`);
     console.log(`=======================================================`);
 });
