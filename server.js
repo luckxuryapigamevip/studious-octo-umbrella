@@ -1,6 +1,5 @@
-// ========================================================================
-// [MODULE 1] IMPORT THƯ VIỆN LÕI
-// ========================================================================
+'use strict';
+
 const express = require('express');
 const axios = require('axios');
 const fs = require('fs');
@@ -8,534 +7,550 @@ const path = require('path');
 
 const app = express();
 
-// ========================================================================
-// [MODULE 2] MIDDLEWARE & BẢO MẬT
-// ========================================================================
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     next();
 });
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json());
 
-// ========================================================================
-// [MODULE 3] CẤU HÌNH HỆ THỐNG
-// ========================================================================
-const CONFIG = {
-    PORT: process.env.PORT || 3000,
-    HOST: '0.0.0.0',
-    // Mảng chứa các domain có thể dùng để tự động fallback
-    API_DOMAINS: [
-        'https://ixiu.maksh3979madfw.com',
-        'https://taixiu.maksh3979madfw.com',
-        'https://taixiumd5.maksh3979madfw.com'
-    ],
-    DB_DIR: process.env.DB_DIR || (fs.existsSync('/data') ? '/data' : (process.env.RENDER ? '/tmp' : path.join(__dirname, 'db_v31'))),
-    TICK_MS: 10000, // 10 giây quét 1 lần
-    VERSION: 'V31.2.0-TXTX-RENDER-PRO'
-};
+const PORT = process.env.PORT || 3000;
+const API_MD5 = 'https://taixiumd5.maksh3979madfw.com/api/md5luckydice/GetSoiCau';
+const API_TX = 'https://taixiu.maksh3979madfw.com/api/luckydice/GetSoiCau';
+const DB_DIR = process.env.DB_DIR || __dirname;
+const TICK_MS = 5000;
 
-// Khởi tạo thư mục DB
-if (!fs.existsSync(CONFIG.DB_DIR)) {
-    try { fs.mkdirSync(CONFIG.DB_DIR, { recursive: true }); } catch (e) {}
+if (!fs.existsSync(DB_DIR)) { try { fs.mkdirSync(DB_DIR, { recursive: true }); } catch (e) {} }
+
+function safeInt(x, def = 0) { const n = parseInt(x, 10); return Number.isFinite(n) ? n : def; }
+function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+const label = c => c === 'T' ? 'Tài' : (c === 'X' ? 'Xỉu' : null);
+const flip = c => c === 'T' ? 'X' : (c === 'X' ? 'T' : null);
+
+function readDB(g) {
+    const p = path.join(DB_DIR, `db_v13_${g}.json`);
+    try { if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) {}
+    return { history: [], lastProcessedSession: null, weights: {}, streakStats: { T: {}, X: {} } };
+}
+function saveDB(g, db) {
+    const p = path.join(DB_DIR, `db_v13_${g}.json`);
+    try { fs.writeFileSync(p, JSON.stringify(db, null, 2)); } catch (e) {}
+}
+function getDice(it) { return [safeInt(it?.FirstDice), safeInt(it?.SecondDice), safeInt(it?.ThirdDice)]; }
+function getSum(it) {
+    const s = getDice(it).reduce((a, b) => a + b, 0);
+    return (s >= 3 && s <= 18) ? s : safeInt(it?.DiceSum);
+}
+function getResult(it) {
+    const s = getSum(it);
+    return (s >= 3 && s <= 18) ? (s >= 11 ? 'T' : 'X') : null;
 }
 
-// Bắt lỗi toàn cục (Không để server crash)
-process.on('uncaughtException', (err) => console.error('[FATAL EXCEPTION]', err.message));
-process.on('unhandledRejection', (reason) => console.error('[FATAL REJECTION]', reason));
-
 // ========================================================================
-// [MODULE 4] CORE HELPERS & MATH UTILS
+// 1. TOÁN HỌC CORE & ENTROPY
 // ========================================================================
-class MathUtils {
-    static safeInt(val, def = 0) {
-        const parsed = parseInt(val, 10);
-        return Number.isFinite(parsed) ? parsed : def;
-    }
-    static clamp(val, min, max) {
-        return Math.max(min, Math.min(max, val));
-    }
-    static round(val, decimals = 3) {
-        return Number(Math.round(val + 'e' + decimals) + 'e-' + decimals);
-    }
-    static logWeight(val, base = 2) {
-        return Math.log(Math.max(0.1, val)) / Math.log(base);
-    }
+function calcEntropy(arr) {
+    const f = {}; for (const x of arr) f[x] = (f[x] || 0) + 1;
+    let h = 0; const n = arr.length;
+    for (const k in f) { const p = f[k] / n; if (p > 0) h -= p * Math.log2(p); }
+    return h;
 }
 
-class Core {
-    static getLabel(code) { return code === 'T' ? 'Tài' : (code === 'X' ? 'Xỉu' : null); }
-    static flip(code) { return code === 'T' ? 'X' : (code === 'X' ? 'T' : null); }
-    
-    static getDice(item) {
-        return [
-            MathUtils.safeInt(item?.FirstDice),
-            MathUtils.safeInt(item?.SecondDice),
-            MathUtils.safeInt(item?.ThirdDice)
-        ];
-    }
-    static getSum(item) {
-        const s = this.getDice(item).reduce((a, b) => a + b, 0);
-        return (s >= 3 && s <= 18) ? s : MathUtils.safeInt(item?.DiceSum);
-    }
-    static getResult(item) {
-        const s = this.getSum(item);
-        return (s >= 3 && s <= 18) ? (s >= 11 ? 'T' : 'X') : null;
-    }
-
-    static levenshteinDistance(str1, str2) {
-        if (str1 === str2) return 0;
-        if (str1.length === 0) return str2.length;
-        if (str2.length === 0) return str1.length;
-        const matrix = Array(str2.length + 1).fill(null).map(() => Array(str1.length + 1).fill(null));
-        for (let i = 0; i <= str1.length; i++) matrix[0][i] = i;
-        for (let j = 0; j <= str2.length; j++) matrix[j][0] = j;
-        for (let j = 1; j <= str2.length; j++) {
-            for (let i = 1; i <= str1.length; i++) {
-                const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
-                matrix[j][i] = Math.min(
-                    matrix[j][i - 1] + 1,
-                    matrix[j - 1][i] + 1,
-                    matrix[j - 1][i - 1] + indicator
-                );
+// Học phân phối độ dài Bệt từ lịch sử
+function updateStreakStats(seq, db) {
+    if (!db.streakStats) db.streakStats = { T: {}, X: {} };
+    let curSide = seq[0], curLen = 1;
+    for (let i = 1; i < seq.length; i++) {
+        if (seq[i] === curSide) curLen++;
+        else {
+            const side = curSide, len = curLen;
+            if (!db.streakStats[side][len]) db.streakStats[side][len] = { cont: 0, stop: 0 };
+            db.streakStats[side][len].stop++;
+            for (let l = 1; l < len; l++) {
+                if (!db.streakStats[side][l]) db.streakStats[side][l] = { cont: 0, stop: 0 };
+                db.streakStats[side][l].cont++;
             }
+            curSide = seq[i]; curLen = 1;
         }
-        return matrix[str2.length][str1.length];
     }
 }
 
 // ========================================================================
-// [MODULE 5] DATABASE MANAGER
+// 2. ENGINE SINH 120+ CẦU TỰ ĐỘNG (12 FAMILIES x 10 VARIANTS)
 // ========================================================================
-class DB {
-    static getFilePath(game) { return path.join(CONFIG.DB_DIR, `db_v31_${game}.json`); }
-    
-    static load(game) {
-        const file = this.getFilePath(game);
-        try {
-            if (fs.existsSync(file)) {
-                const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-                return {
-                    history: parsed.history || [],
-                    lastSession: parsed.lastSession || null,
-                    algoStats: parsed.algoStats || {}
-                };
-            }
-        } catch (e) {}
-        return { history: [], lastSession: null, algoStats: {} };
-    }
-    
-    static save(game, db) {
-        const file = this.getFilePath(game);
-        const tmp = file + '.tmp';
-        try {
-            fs.writeFileSync(tmp, JSON.stringify(db), 'utf8');
-            fs.renameSync(tmp, file);
-        } catch (e) { console.error('[DB SAVE ERROR]', e.message); }
-    }
-}
+function generate120Patterns() {
+    const algos = [];
 
-// ========================================================================
-// [MODULE 6] BỘ LỌC NHIỄU (NOISE FILTER)
-// ========================================================================
-class NoiseFilter {
-    static isPureTXTX(seq, lookback = 10) {
-        if (seq.length < lookback) return false;
-        const recent = seq.slice(-lookback);
-        let alternatingCount = 0;
-        for (let i = 1; i < recent.length; i++) {
-            if (recent[i] !== recent[i - 1]) alternatingCount++;
-        }
-        // Cho phép sai số nhịp (>=70% là đảo liên tục)
-        return (alternatingCount / (lookback - 1)) >= 0.70;
-    }
-}
-
-// ========================================================================
-// [MODULE 7] ĐỘNG CƠ TXTX
-// ========================================================================
-class TXTXEngine {
-    static markovTXTX(seq) {
-        if (seq.length < 10) return null;
-        const last = seq[seq.length - 1];
-        let countFlip = 0;
-        for (let i = seq.length - 10; i < seq.length; i++) {
-            if (seq[i] !== seq[i - 1]) countFlip++;
-        }
-        if (countFlip >= 7) {
-            return { code: Core.flip(last), name: 'TXTX-MARKOV', conf: 0.82, id: 'tx_markov' };
-        }
-        return null;
-    }
-
-    static recursiveTXTX(seq, windowSize = 6) {
-        if (seq.length < windowSize + 5) return null;
-        const target = seq.slice(-windowSize).join('');
-        let tCount = 0, xCount = 0, occurrences = 0;
-
-        for (let i = 0; i <= seq.length - windowSize - 1; i++) {
-            const sub = seq.slice(i, i + windowSize).join('');
-            if (Core.levenshteinDistance(sub, target) <= 1) { 
-                occurrences++;
-                if (seq[i + windowSize] === 'T') tCount++;
-                else xCount++;
-            }
-        }
-
-        if (occurrences >= 1) {
-            const conf = Math.max(tCount, xCount) / occurrences;
-            if (conf >= 0.60) {
-                return { code: tCount > xCount ? 'T' : 'X', name: `TXTX-EXACT`, conf: conf, id: 'tx_exact' };
-            }
-        }
-        return null;
-    }
-
-    static deviationAnalysis(seq) {
-        if (seq.length < 8) return null;
-        const last4 = seq.slice(-4).join('');
-        if (last4 === 'TXXT' || last4 === 'XTTX') {
-            return { code: Core.flip(seq[seq.length - 1]), name: 'TXTX-SỬA LỖI', conf: 0.75, id: 'tx_fix' };
-        }
-        return null;
-    }
-}
-
-// ========================================================================
-// [MODULE 8] META ENGINE (TỔNG HỢP)
-// ========================================================================
-class MetaEngine {
-    static analyze(seq, db) {
-        if (!NoiseFilter.isPureTXTX(seq, 10)) {
-            return { code: null, label: 'NHIỄU - BỎ QUA', tiLe: '0.0%', weak: true, details: [] };
-        }
-
-        const candidates = [
-            TXTXEngine.markovTXTX(seq),
-            TXTXEngine.recursiveTXTX(seq),
-            TXTXEngine.deviationAnalysis(seq)
-        ].filter(Boolean);
-
-        if (candidates.length === 0) {
-            return {
-                code: Core.flip(seq[seq.length - 1]),
-                label: 'TXTX-CƠ BẢN',
-                tiLe: '60.0%',
-                weak: false,
-                details: [{ algo: 'tx_basic', family: 'txtx', code: Core.flip(seq[seq.length - 1]), name: 'TXTX-MẶC ĐỊNH', conf: 0.60, vote: 0.60 }]
-            };
-        }
-
-        const votes = { T: 0, X: 0 };
-        const details = [];
-
-        for (const algo of candidates) {
-            const stats = db.algoStats?.[algo.id] || { weight: 1.0, loseStreak: 0, winStreak: 0 };
-            let weight = stats.weight || 1.0;
-            if (stats.winStreak >= 2) weight *= 1.5;
-            if (stats.loseStreak >= 2) weight = Math.max(0.1, weight * 0.5);
-            
-            const finalWeight = MathUtils.clamp(MathUtils.logWeight(weight + 1), 0.1, 2.5);
-            const power = algo.conf * finalWeight;
-
-            votes[algo.code] += power;
-            details.push({ algo: algo.id, family: 'txtx', code: algo.code, name: algo.name, conf: MathUtils.round(algo.conf, 3), vote: MathUtils.round(power, 3) });
-        }
-
-        const totalVotes = votes.T + votes.X;
-        let winner, confidence;
-
-        if (totalVotes < 0.1) {
-            winner = Core.flip(seq[seq.length - 1]);
-            confidence = 0.60;
-            details.push({ algo: 'tx_fb', family: 'txtx', code: winner, name: 'TXTX-FALLBACK', conf: 0.60, vote: 1 });
-        } else {
-            const pT = votes.T / totalVotes;
-            const pX = votes.X / totalVotes;
-            winner = pT > pX ? 'T' : 'X';
-            confidence = Math.max(pT, pX);
-        }
-
-        confidence = MathUtils.clamp(confidence, 0.50, 0.95);
-        const topAlgo = details.filter(d => d.code === winner).sort((a, b) => b.vote - a.vote)[0];
-
-        return {
-            code: winner,
-            label: topAlgo ? `META·${topAlgo.name}` : 'META·TXTX',
-            tiLe: (confidence * 100).toFixed(1) + '%',
-            weak: confidence < 0.65,
-            details
-        };
-    }
-}
-
-// ========================================================================
-// [MODULE 9] FETCHER THÔNG MINH (TỰ ĐỘNG ĐỔI DOMAIN)
-// ========================================================================
-let activeDomainIndex = 0; // Lưu domain đang hoạt động
-
-class Fetcher {
-    static async getData(game) {
-        // Thử tối đa 3 domain nếu domain hiện tại lỗi
-        for (let attempt = 0; attempt < CONFIG.API_DOMAINS.length; attempt++) {
-            // Xoay vòng domain
-            const currentDomain = CONFIG.API_DOMAINS[activeDomainIndex];
-            const pathApi = game === 'md5' ? '/api/md5luckydice/GetSoiCau' : '/api/luckydice/GetSoiCau';
-            const targetUrl = `${currentDomain}${pathApi}`;
-
-            try {
-                const res = await axios.get(targetUrl, { 
-                    timeout: 12000,
-                    headers: { 
-                        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
-                        'Accept': 'application/json, text/plain, */*'
-                    }
-                });
-
-                let arr = [];
-                let data = res.data;
-                if (Array.isArray(data)) arr = data;
-                else if (data && data.data && Array.isArray(data.data)) arr = data.data;
-                else if (data && data.data && data.data.list) arr = data.data.list;
-
-                if (Array.isArray(arr) && arr.length > 5) {
-                    if (Number(arr[0].SessionId) > Number(arr[arr.length - 1].SessionId)) arr.reverse(); 
-                    console.log(`[FETCH OK] ${game.toUpperCase()} | Domain: ${currentDomain} | Phiên mới nhất: ${arr[arr.length-1].SessionId}`);
-                    return arr;
+    // --- FAMILY 1: BỆT (STREAK) ---
+    for (let minLen = 2; minLen <= 6; minLen++) {
+        algos.push({
+            id: `streak_${minLen}`, base: 1.5,
+            fn: (seq, db) => {
+                const n = seq.length, last = seq[n - 1]; let len = 1;
+                for (let i = n - 2; i >= 0; i--) { if (seq[i] === last) len++; else break; }
+                if (len < minLen) return null;
+                const stats = db.streakStats?.[last]?.[len];
+                if (stats && (stats.cont + stats.stop) >= 2) {
+                    const pCont = (stats.cont + 1) / (stats.cont + stats.stop + 2);
+                    if (pCont > 0.55) return { code: last, name: `BỆT-${len}-TIẾP`, conf: clamp(pCont, 0.6, 0.85) };
+                    if (pCont < 0.45) return { code: flip(last), name: `BỆT-${len}-GÃY`, conf: clamp(1 - pCont, 0.6, 0.85) };
                 }
-            } catch (e) {
-                console.error(`[FETCH FAIL] ${game.toUpperCase()} | Domain: ${currentDomain} | Lỗi: ${e.message}`);
-                // Đổi domain tiếp theo
-                activeDomainIndex = (activeDomainIndex + 1) % CONFIG.API_DOMAINS.length;
-                await new Promise(r => setTimeout(r, 1000));
+                return null;
             }
-        }
-        return []; // Trả về rỗng nếu chết hết cả 3 domain
-    }
-}
-
-// ========================================================================
-// [MODULE 10] WORKER (XỬ LÝ NGẦM)
-// ========================================================================
-class Worker {
-    static async process(game) {
-        try {
-            const list = await Fetcher.getData(game);
-            if (!list || list.length < 10) return;
-
-            const latest = list[list.length - 1];
-            const session = MathUtils.safeInt(latest.SessionId);
-            const db = DB.load(game);
-
-            if (db.lastSession !== null && session <= db.lastSession) return;
-
-            const seq = list.map(Core.getResult).filter(Boolean);
-            const prev = db.history[db.history.length - 1];
-            
-            // Cập nhật kết quả phiên trước
-            if (prev && MathUtils.safeInt(prev.phienDuDoan) <= session) {
-                const targetItem = list.find(x => MathUtils.safeInt(x.SessionId) === prev.phienDuDoan);
-                if (targetItem) {
-                    const actual = Core.getResult(targetItem);
-                    prev.ketQua = actual; prev.ketQuaLabel = Core.getLabel(actual);
-                    prev.trangThai = prev.DU_DOAN_CODE === actual ? 'ĐÚNG' : 'SAI';
-                    
-                    if (!db.algoStats) db.algoStats = {};
-                    for (const d of prev.algoDetails) {
-                        if (!db.algoStats[d.algo]) db.algoStats[d.algo] = { weight: 1.0, loseStreak: 0, winStreak: 0 };
-                        const stat = db.algoStats[d.algo];
-                        if (d.code === actual) {
-                            stat.weight = MathUtils.clamp(stat.weight + 0.1, 0.5, 3.0);
-                            stat.loseStreak = 0;
-                            stat.winStreak = (stat.winStreak || 0) + 1;
-                        } else {
-                            stat.weight = MathUtils.clamp(stat.weight - 0.2, 0.1, 3.0);
-                            stat.loseStreak += 1;
-                            stat.winStreak = 0;
-                        }
-                    }
-                }
-            }
-
-            const pred = MetaEngine.analyze(seq, db);
-
-            db.history.push({
-                phien: session, xucXac: Core.getDice(latest), tong: Core.getSum(latest),
-                ketQua: Core.getResult(latest), ketQuaLabel: Core.getLabel(Core.getResult(latest)),
-                phienDuDoan: session + 1, DU_DOAN_CODE: pred.code, DU_DOAN: Core.getLabel(pred.code),
-                TI_LE: pred.tiLe, patternName: pred.label, algoDetails: pred.details,
-                weak: pred.weak, trangThai: 'ĐANG CHỜ'
-            });
-
-            db.lastSession = session;
-            DB.save(game, db);
-        } catch (err) {
-            console.error('[WORKER ERROR]', err.message);
-        }
-    }
-
-    static start() {
-        let isProcessing = false;
-        const run = async () => {
-            if (isProcessing) return;
-            isProcessing = true;
-            try {
-                await this.process('md5'); 
-                await this.process('taixiu'); 
-            } finally {
-                isProcessing = false;
-            }
-        };
-        run(); 
-        setInterval(run, CONFIG.TICK_MS);
-    }
-}
-
-Worker.start();
-
-// ========================================================================
-// [MODULE 11] GIAO DIỆN & API ROUTES
-// ========================================================================
-app.get('/', (req, res) => res.redirect('/history/md5'));
-
-app.get('/history/:game(md5|taixiu)', async (req, res) => {
-    try {
-        const game = req.params.game;
-        const db = DB.load(game);
-        
-        const page = MathUtils.safeInt(req.query.page, 1);
-        const limit = 100;
-        const startIndex = Math.max(0, db.history.length - (page * limit));
-        const endIndex = db.history.length - ((page - 1) * limit);
-        const rows = db.history.slice(startIndex, endIndex).reverse();
-
-        const settled = db.history.filter(h => h.trangThai === 'ĐÚNG' || h.trangThai === 'SAI');
-        const correct = settled.filter(h => h.trangThai === 'ĐÚNG').length;
-        const acc = settled.length ? (correct / settled.length * 100).toFixed(1) : '0.0';
-
-        // Nếu DB rỗng (do API chết trên Render), hiển thị cảnh báo
-        const warningHtml = db.history.length === 0 ? `
-            <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid #ef4444; color: #ef4444; padding: 15px; border-radius: 8px; text-align: center; margin-bottom: 20px;">
-                <b>⚠️ CHƯA CÓ DỮ LIỆU</b><br>
-                <span style="font-size: 12px;">Hệ thống đang chờ API phản hồi. Nếu quá 1 phút vẫn trống, có thể IP của Render đã bị nhà cái chặn. Hãy xem Logs trên Render để kiểm tra.</span>
-            </div>
-        ` : '';
-
-        const html = `<!DOCTYPE html>
-        <html lang="vi">
-        <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-        <title>TXTX AI - ${game.toUpperCase()}</title>
-        <style>
-            :root { --bg: #09090b; --card: #18181b; --text: #f4f4f5; --green: #10b981; --red: #ef4444; --yellow: #f59e0b; --border: #27272a; }
-            * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, sans-serif; }
-            body { background: var(--bg); color: var(--text); padding: 15px; }
-            .header { background: var(--card); padding: 20px; border-radius: 12px; text-align: center; margin-bottom: 20px; border: 1px solid var(--border); }
-            h1 { font-size: 20px; text-transform: uppercase; margin-bottom: 15px; color: #a78bfa; }
-            .acc { font-size: 28px; font-weight: 900; color: ${parseFloat(acc) >= 55 ? 'var(--green)' : 'var(--red)'}; }
-            .table-wrap { background: var(--card); border-radius: 12px; overflow-x: auto; border: 1px solid var(--border); margin-bottom: 20px; }
-            table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: center; }
-            th { background: #27272a; padding: 15px 5px; color: #a1a1aa; font-size: 11px; text-transform: uppercase; }
-            td { padding: 12px 5px; border-bottom: 1px solid var(--border); }
-            .tai { color: var(--green); font-weight: bold; }
-            .xiu { color: var(--red); font-weight: bold; }
-            .dung { color: var(--green); font-weight: bold; }
-            .sai { color: var(--red); font-weight: bold; }
-            .cho { color: var(--yellow); font-weight: bold; }
-            .dice-box { display: flex; justify-content: center; gap: 3px; }
-            .dice { width: 20px; height: 20px; background: #fff; color: #000; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 12px; }
-            .sum { background: #27272a; padding: 4px 8px; border-radius: 6px; color: var(--yellow); font-weight: bold; }
-            .pattern { background: #27272a; padding: 4px 8px; border-radius: 6px; font-size: 11px; border: 1px solid #3f3f46; color: #cbd5e1; }
-            .pagination { display: flex; justify-content: center; gap: 10px; margin-top: 20px; }
-            .pagination a { color: #a78bfa; text-decoration: none; padding: 8px 16px; background: var(--card); border-radius: 8px; border: 1px solid var(--border); }
-        </style>
-        <script>setTimeout(() => { window.location.reload(); }, 5000);</script>
-        </head>
-        <body>
-            <div class="header">
-                <h1>HỆ THỐNG TXTX - ${game.toUpperCase()}</h1>
-                <div class="acc">${acc}%</div>
-                <div style="font-size:12px; color:#888; margin-top:5px;">Tổng ${settled.length} phiên đã học</div>
-            </div>
-            ${warningHtml}
-            <div class="table-wrap">
-                <table>
-                    <thead><tr><th>Phiên</th><th>XX</th><th>Tổng</th><th>KQ</th><th>Dự Đoán</th><th>Cầu</th><th>Trạng Thái</th></tr></thead>
-                    <tbody>
-                        ${rows.map(it => `
-                            <tr>
-                                <td style="color: #71717a;">${it.phien}</td>
-                                <td><div class="dice-box">${(it.xucXac||[]).map(d => `<div class="dice">${d}</div>`).join('')}</div></td>
-                                <td><span class="sum">${it.tong}</span></td>
-                                <td class="${it.ketQua === 'T' ? 'tai' : 'xiu'}">${it.ketQuaLabel || 'N/A'}</td>
-                                <td class="${it.DU_DOAN_CODE === 'T' ? 'tai' : 'xiu'}">${it.DU_DOAN || 'N/A'} (${it.TI_LE})</td>
-                                <td><span class="pattern">${it.patternName}</span></td>
-                                <td class="${it.trangThai === 'ĐÚNG' ? 'dung' : (it.trangThai === 'SAI' ? 'sai' : 'cho')}">${it.trangThai}</td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
-            </div>
-            <div class="pagination">
-                ${page > 1 ? `<a href="?page=${page - 1}">Trang trước</a>` : ''}
-                <span style="padding: 8px 16px;">Trang ${page}</span>
-                ${rows.length === limit ? `<a href="?page=${page + 1}">Trang tiếp</a>` : ''}
-            </div>
-        </body>
-        </html>`;
-        res.send(html);
-    } catch (err) { res.status(500).send('Lỗi UI: ' + err.message); }
-});
-
-app.get('/:game(md5|taixiu)', async (req, res) => {
-    try {
-        const game = req.params.game;
-        let list = await Fetcher.getData(game);
-        let db = DB.load(game);
-
-        // Nếu không lấy được từ API, dùng tạm DB cũ để không bị sập API Endpoint
-        if (!list || list.length < 10) {
-            if (db.history.length === 0) return res.status(503).json({ error: 'No Data API blocked' });
-            list = db.history.slice(-50).map(h => ({ 
-                SessionId: h.phien, 
-                FirstDice: h.xucXac[0]||1, 
-                SecondDice: h.xucXac[1]||1, 
-                ThirdDice: h.xucXac[2]||1 
-            }));
-        }
-
-        const latest = list[list.length - 1];
-        const session = MathUtils.safeInt(latest.SessionId);
-        const seq = list.map(Core.getResult).filter(Boolean);
-        const pred = MetaEngine.analyze(seq, db);
-
-        if (!pred.code) {
-            return res.json({ success: true, message: "Nhiễu cầu, bỏ qua phiên này", duDoan: "BỎ QUA" });
-        }
-
-        res.json({
-            success: true, game, phien: session,
-            xucXac: Core.getDice(latest), tong: Core.getSum(latest),
-            ketQua: Core.getResult(latest), ketQuaLabel: Core.getLabel(Core.getResult(latest)),
-            phienDuDoan: session + 1, duDoan: Core.getLabel(pred.code),
-            duDoanCode: pred.code, tiLe: pred.tiLe, reason: pred.label,
-            weak: pred.weak, algoVotes: pred.details
         });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
     }
-});
+    // Thêm 4 biến thể bệt thuần không học
+    for (let minLen = 3; minLen <= 6; minLen++) {
+        algos.push({
+            id: `streak_pure_${minLen}`, base: 1.2,
+            fn: (seq) => {
+                const n = seq.length, last = seq[n - 1]; let len = 1;
+                for (let i = n - 2; i >= 0; i--) { if (seq[i] === last) len++; else break; }
+                if (len >= minLen) return { code: last, name: `BỆT-THUẦN-${len}`, conf: 0.65 };
+                return null;
+            }
+        });
+    }
+
+    // --- FAMILY 2: ĐẢO 1-1 (BOUNCE) ---
+    for (let win = 4; win <= 8; win++) {
+        algos.push({
+            id: `bounce_${win}`, base: 1.4,
+            fn: (seq) => {
+                const n = seq.length; if (n < win + 1) return null;
+                let flips = 0;
+                for (let i = n - win; i < n; i++) if (seq[i] !== seq[i - 1]) flips++;
+                if (flips === win) return { code: flip(seq[n - 1]), name: `ĐẢO-1-1-W${win}`, conf: 0.75 };
+                return null;
+            }
+        });
+    }
+
+    // --- FAMILY 3: ZIGZAG (A-B-A-B) ---
+    for (let p = 2; p <= 6; p++) {
+        algos.push({
+            id: `zigzag_${p}`, base: 1.3,
+            fn: (seq) => {
+                const n = seq.length; if (n < p * 2 + 2) return null;
+                let match = true;
+                for (let i = n - p * 2; i < n - p; i++) if (seq[i] !== seq[i + p]) { match = false; break; }
+                if (match) return { code: seq[n - p], name: `ZIGZAG-${p}`, conf: 0.72 };
+                return null;
+            }
+        });
+    }
+
+    // --- FAMILY 4: GƯƠNG (MIRROR) ---
+    for (let half = 3; half <= 7; half++) {
+        algos.push({
+            id: `mirror_${half}`, base: 1.3,
+            fn: (seq) => {
+                const n = seq.length; if (n < half * 2 + 2) return null;
+                const rec = seq.slice(-(half * 2));
+                if (rec.slice(0, half).map(flip).join('') === rec.slice(half).join('')) return { code: flip(seq[n - 1]), name: `GƯƠNG-${half}`, conf: 0.7 };
+                return null;
+            }
+        });
+    }
+
+    // --- FAMILY 5: N-GRAM CỐ ĐỊNH ---
+    for (let len = 3; len <= 8; len++) {
+        algos.push({
+            id: `ngram_${len}`, base: 1.4,
+            fn: (seq) => {
+                const n = seq.length; if (n < len + 5) return null;
+                const tail = seq.slice(-len).join(''); let t = 0, x = 0, occ = 0;
+                for (let i = 0; i + len < n; i++) {
+                    if (seq.slice(i, i + len).join('') === tail) {
+                        occ++; if (seq[i + len] === 'T') t++; else x++;
+                    }
+                }
+                if (occ < 2) return null;
+                const pT = (t + 1) / (occ + 2), pX = (x + 1) / (occ + 2);
+                const conf = Math.max(pT, pX);
+                if (conf < 0.65) return null;
+                return { code: pT > pX ? 'T' : 'X', name: `NGRAM-${len}`, conf };
+            }
+        });
+    }
+    
+    // Thêm 2 biến thể N-Gram có Skip (cách quãng)
+    for (let len = 3; len <= 5; len++) {
+        algos.push({
+            id: `ngram_skip_${len}`, base: 1.2,
+            fn: (seq) => {
+                const n = seq.length; if (n < len * 2 + 5) return null;
+                let t = 0, x = 0, occ = 0;
+                const tail = [seq[n-1], seq[n-3], seq[n-5]].join(''); // Lấy cách quãng
+                for (let i = 0; i + 6 < n; i++) {
+                    if ([seq[i], seq[i+2], seq[i+4]].join('') === tail) {
+                        occ++; if (seq[i+6] === 'T') t++; else x++;
+                    }
+                }
+                if (occ < 2) return null;
+                const pT = (t + 1) / (occ + 2), pX = (x + 1) / (occ + 2);
+                if (Math.max(pT, pX) < 0.65) return null;
+                return { code: pT > pX ? 'T' : 'X', name: `NGRAM-SKIP-${len}`, conf: Math.max(pT, pX) };
+            }
+        });
+    }
+
+    // --- FAMILY 6: MARKOV BẬC 2 ĐẾN 8 ---
+    for (let k = 2; k <= 8; k++) {
+        algos.push({
+            id: `markov_${k}`, base: 1.5,
+            fn: (seq) => {
+                const n = seq.length; if (n < k + 5) return null;
+                const key = seq.slice(-k).join(''); let t = 0, x = 0;
+                for (let i = k; i < n; i++) {
+                    if (seq.slice(i - k, i).join('') === key) { if (seq[i] === 'T') t++; else x++; }
+                }
+                const total = t + x; if (total < 3) return null;
+                const pT = (t + 1) / (total + 2), pX = (x + 1) / (total + 2);
+                const conf = Math.max(pT, pX);
+                if (conf < 0.6) return null;
+                return { code: pT > pX ? 'T' : 'X', name: `MARKOV-${k}`, conf };
+            }
+        });
+    }
+
+    // --- FAMILY 7: CHU KỲ (CYCLE) ---
+    for (let p = 2; p <= 15; p++) {
+        algos.push({
+            id: `cycle_${p}`, base: 1.2,
+            fn: (seq) => {
+                const n = seq.length; if (n < p * 2 + 2) return null;
+                let match = 0, total = 0;
+                for (let i = p; i < n; i++) { total++; if (seq[i] === seq[i - p]) match++; }
+                const ratio = match / total;
+                if (ratio >= 0.7) return { code: seq[n - p], name: `CHU-KỲ-${p}`, conf: clamp(ratio, 0.7, 0.9) };
+                return null;
+            }
+        });
+    }
+
+    // --- FAMILY 8: GAP (KHOẢNG CÁCH) ---
+    for (let threshold = 0.5; threshold <= 1.4; threshold += 0.15) {
+        algos.push({
+            id: `gap_${threshold.toFixed(2)}`, base: 1.1,
+            fn: (seq) => {
+                const n = seq.length; if (n < 20) return null;
+                const tP = [], xP = []; for (let i = 0; i < n; i++) { if (seq[i] === 'T') tP.push(i); else xP.push(i); }
+                if (tP.length < 3 || xP.length < 3) return null;
+                const tG = tP[tP.length-1] - tP[tP.length-2], xG = xP[xP.length-1] - xP[xP.length-2];
+                const tPress = (n - tP[tP.length - 1]) / Math.max(tG, 1), xPress = (n - xP[xP.length - 1]) / Math.max(xG, 1);
+                const diff = tPress - xPress; 
+                if (Math.abs(diff) < threshold) return null;
+                if (diff > threshold) return { code: 'T', name: `GAP-T-${threshold.toFixed(1)}`, conf: clamp(0.55 + diff * 0.05, 0.55, 0.8) };
+                return { code: 'X', name: `GAP-X-${threshold.toFixed(1)}`, conf: clamp(0.55 + Math.abs(diff) * 0.05, 0.55, 0.8) };
+            }
+        });
+    }
+
+    // --- FAMILY 9: FRACTAL (LẶP LẠI KHỐI) ---
+    for (let sc = 3; sc <= 8; sc++) {
+        algos.push({
+            id: `fractal_${sc}`, base: 1.3,
+            fn: (seq) => {
+                const n = seq.length; if (n < sc * 3) return null;
+                let t = 0, x = 0, cnt = 0;
+                const lastB = seq.slice(-sc).join('');
+                for (let i = 0; i + sc < n - sc; i += 1) { // Tìm khối giống nhau
+                    if (seq.slice(i, i + sc).join('') === lastB) {
+                        if (seq[i + sc] === 'T') t++; else x++; cnt++;
+                    }
+                }
+                if (cnt < 2) return null;
+                const pT = (t + 0.5) / (cnt + 1), pX = (x + 0.5) / (cnt + 1);
+                if (Math.max(pT, pX) < 0.65) return null;
+                return { code: pT > pX ? 'T' : 'X', name: `FRACTAL-${sc}`, conf: Math.max(pT, pX) };
+            }
+        });
+    }
+
+    // --- FAMILY 10: MOMENTUM MULTI-TIMEFRAME ---
+    for (let w = 5; w <= 20; w += 3) {
+        algos.push({
+            id: `mtf_${w}`, base: 1.1,
+            fn: (seq) => {
+                const n = seq.length; if (n < w) return null;
+                const pT = seq.slice(-w).filter(x => x === 'T').length / w;
+                if (pT >= 0.7) return { code: 'X', name: `MTF-REV-X-${w}`, conf: 0.62 };
+                if (pT <= 0.3) return { code: 'T', name: `MTF-REV-T-${w}`, conf: 0.62 };
+                if (pT >= 0.6) return { code: 'T', name: `MTF-FOLLOW-T-${w}`, conf: 0.58 };
+                if (pT <= 0.4) return { code: 'X', name: `MTF-FOLLOW-X-${w}`, conf: 0.58 };
+                return null;
+            }
+        });
+    }
+
+    // --- FAMILY 11: LỰC KÉO CÂN BẰNG (PULL) ---
+    for (let w = 20; w <= 50; w += 5) {
+        algos.push({
+            id: `pull_${w}`, base: 1.0,
+            fn: (seq) => {
+                const n = seq.length; if (n < w) return null;
+                const recent = seq.slice(-w); const tCount = recent.filter(x => x === 'T').length;
+                const pT = tCount / recent.length;
+                if (pT >= 0.60) return { code: 'X', name: `KÉO-CB-X-${w}`, conf: clamp(0.52 + (pT - 0.60), 0.52, 0.75) };
+                if (pT <= 0.40) return { code: 'T', name: `KÉO-CB-T-${w}`, conf: clamp(0.52 + (0.40 - pT), 0.52, 0.75) };
+                return null;
+            }
+        });
+    }
+
+    // --- FAMILY 12: SUM PATTERN (ĐIỂM TỔNG) ---
+    for (let w = 10; w <= 20; w += 5) {
+        algos.push({
+            id: `sum_${w}`, base: 1.0,
+            fn: (seq, sums) => {
+                if (!sums || sums.length < w) return null;
+                const rec = sums.slice(-w);
+                const half = Math.floor(w / 2);
+                const m1 = rec.slice(0, half).reduce((a, b) => a + b, 0) / half;
+                const m2 = rec.slice(half).reduce((a, b) => a + b, 0) / half;
+                if (m2 - m1 > 2.0) return { code: 'X', name: `SUM-UP-${w}`, conf: 0.62 };
+                if (m1 - m2 > 2.0) return { code: 'T', name: `SUM-DOWN-${w}`, conf: 0.62 };
+                return null;
+            }
+        });
+    }
+
+    return algos;
+}
+
+const ALL_ALGOS = generate120Patterns();
 
 // ========================================================================
-// [MODULE 12] KHỞI CHẠY
+// 3. META ENGINE V13 - TỔNG HỢP 120+ CẦU
 // ========================================================================
-app.listen(CONFIG.PORT, CONFIG.HOST, () => {
-    console.log(`=======================================================`);
-    console.log(`🚀 ${CONFIG.VERSION} ONLINE - PORT ${CONFIG.PORT}`);
-    console.log(`🌐 DB DIR: ${CONFIG.DB_DIR}`);
-    console.log(`🎯 FOCUS: TXTX PATTERN ONLY`);
-    console.log(`=======================================================`);
+function runMetaEngine(seq, sums, db, session) {
+    const votes = { T: 0, X: 0 };
+    const details = [];
+
+    // Chạy tất cả 120+ thuật toán
+    for (const algo of ALL_ALGOS) {
+        let res = null; 
+        try { res = algo.fn(seq, sums, db); } catch (e) { res = null; }
+        if (!res || !res.code) continue;
+
+        // Lấy trọng số học online
+        const learnedWeight = db.weights?.[algo.id] || 1.0;
+        const w = clamp(algo.base * learnedWeight, 0.3, 3.0);
+        
+        const finalVote = res.conf * w;
+        votes[res.code] += finalVote;
+        details.push({ algo: algo.id, code: res.code, name: res.name, conf: +res.conf.toFixed(2), vote: +finalVote.toFixed(2) });
+    }
+
+    const total = votes.T + votes.X;
+    let winner, confidence, gap;
+
+    // BẮT BUỘC RA KẾT QUẢ: Nếu không có thuật toán nào nhận diện được cầu
+    if (total < 0.01) {
+        const recent = seq.slice(-20);
+        const tCount = recent.filter(x => x === 'T').length;
+        winner = tCount <= recent.length / 2 ? 'T' : 'X';
+        confidence = 0.51; 
+        details.push({ algo: 'default_pull', code: winner, name: 'CÂN-BẰNG-MẶC-ĐỊNH', conf: 0.51, vote: 1 });
+    } else {
+        const pT = votes.T / total, pX = votes.X / total;
+        gap = Math.abs(pT - pX);
+        winner = pT > pX ? 'T' : 'X';
+        confidence = Math.max(pT, pX);
+    }
+
+    // Chặn trần (Không bao giờ ảo giác 90-99%)
+    confidence = clamp(confidence, 0.50, 0.85);
+    
+    const isWeak = confidence < 0.58;
+    const isVeryWeak = confidence <= 0.52;
+
+    // Tìm thuật toán vote mạnh nhất cho bên thắng
+    const topAlgo = details.filter(d => d.code === winner).sort((a, b) => b.vote - a.vote)[0];
+    let labelName = topAlgo ? topAlgo.name : 'META';
+    
+    // Đếm số lượng thuật toán đồng thuận
+    const consensusCount = details.filter(d => d.code === winner).length;
+    if (consensusCount >= 20) labelName += ` (${consensusCount} cầu)`;
+
+    return {
+        code: winner, 
+        label: labelName, 
+        tiLe: (confidence * 100).toFixed(1) + '%',
+        details, 
+        weak: isWeak, 
+        veryWeak: isVeryWeak, 
+        gap: +(gap || 0).toFixed(2)
+    };
+}
+
+// ========================================================================
+// 4. HỌC ONLINE & CẬP NHẬT
+// ========================================================================
+function updateAllStats(db, prev, actual) {
+    if (!prev || !actual) return;
+    if (!db.weights) db.weights = {};
+    for (const d of (prev.algoDetails || [])) {
+        const isCorrect = (d.code === actual);
+        const curW = db.weights[d.algo] || 1.0;
+        db.weights[d.algo] = clamp(curW + (isCorrect ? 0.05 : -0.05), 0.3, 3.0);
+    }
+}
+
+// ========================================================================
+// 5. FETCH & PROCESS
+// ========================================================================
+async function fetchApi(url) {
+    for (let i = 0; i < 3; i++) {
+        try {
+            const res = await axios.get(url, { timeout: 8000 });
+            let arr = res.data?.data?.list || res.data?.list || res.data?.data || (Array.isArray(res.data) ? res.data : []);
+            if (arr.length >= 2 && Number(arr[0].SessionId) > Number(arr[arr.length - 1].SessionId)) arr.reverse();
+            return arr;
+        } catch (e) { if (i === 2) return []; await new Promise(r => setTimeout(r, 500)); }
+    }
+}
+
+async function processGame(game) {
+    const list = await fetchApi(game === 'md5' ? API_MD5 : API_TX);
+    if (!list || !list.length) return;
+
+    const latest = list[list.length - 1], session = safeInt(latest.SessionId), db = readDB(game);
+    if (db.lastProcessedSession === session) return;
+
+    const seq = list.map(getResult).filter(Boolean);
+    const sums = list.map(getSum).filter(s => s >= 3 && s <= 18);
+    if (seq.length < 15) return; 
+
+    updateStreakStats(seq, db);
+
+    const prev = db.history[db.history.length - 1];
+    if (prev && safeInt(prev.phienDuDoan) === session) {
+        const actual = getResult(latest);
+        prev.ketQua = actual; 
+        prev.ketQuaLabel = label(actual);
+        prev.trangThai = !prev.DU_DOAN_CODE ? 'BỎ QUA' : (prev.DU_DOAN_CODE === actual ? 'ĐÚNG' : 'SAI');
+        updateAllStats(db, prev, actual);
+    }
+
+    const pred = runMetaEngine(seq, sums, db, session + 1);
+
+    db.history.push({
+        phien: session, xucXac: getDice(latest), tong: getSum(latest), ketQua: getResult(latest), ketQuaLabel: label(getResult(latest)),
+        phienDuDoan: session + 1, DU_DOAN_CODE: pred.code, DU_DOAN: label(pred.code), TI_LE: pred.tiLe, patternName: pred.label,
+        algoDetails: pred.details, weak: pred.weak, veryWeak: pred.veryWeak, trangThai: 'ĐANG CHỜ'
+    });
+
+    if (db.history.length > 600) db.history.shift();
+    db.lastProcessedSession = session; 
+    saveDB(game, db);
+}
+
+setInterval(() => { processGame('md5'); processGame('taixiu'); }, TICK_MS);
+
+// ========================================================================
+// 6. API ROUTES & UI
+// ========================================================================
+app.get('/', (req, res) => res.redirect('/md5'));
+
+app.get('/api/predict/:game', async (req, res) => {
+    const game = req.params.game;
+    if (game !== 'md5' && game !== 'taixiu') return res.status(400).json({ success: false });
+    const list = await fetchApi(game === 'md5' ? API_MD5 : API_TX);
+    if (!list || !list.length) return res.status(500).json({ success: false });
+
+    const latest = list[list.length - 1], session = safeInt(latest.SessionId);
+    const seq = list.map(getResult).filter(Boolean);
+    const sums = list.map(getSum).filter(s => s >= 3 && s <= 18);
+    const db = readDB(game), pred = runMetaEngine(seq, sums, db, session + 1);
+
+    res.json({
+        success: true, game, phien: session, xucXac: getDice(latest), tong: getSum(latest), ketQua: getResult(latest), ketQuaLabel: label(getResult(latest)),
+        phienDuDoan: session + 1, duDoan: label(pred.code), duDoanCode: pred.code, tiLe: pred.tiLe, reason: pred.label,
+        weak: pred.weak, veryWeak: pred.veryWeak, algoVotes: pred.details
+    });
 });
+
+app.get('/:game', (req, res) => {
+    const game = req.params.game;
+    if (game !== 'md5' && game !== 'taixiu') return res.send('Trang không tồn tại');
+
+    const db = readDB(game), rows = db.history.slice(-50).reverse();
+    const settled = db.history.filter(h => h.trangThai === 'ĐÚNG' || h.trangThai === 'SAI');
+    const correct = settled.filter(h => h.trangThai === 'ĐÚNG').length;
+    const acc = settled.length ? (correct / settled.length * 100).toFixed(1) : '0.0';
+
+    const strong = settled.filter(h => !h.weak), weak = settled.filter(h => h.weak);
+    const sWR = strong.length ? (strong.filter(h => h.trangThai === 'ĐÚNG').length / strong.length * 100).toFixed(1) : '-';
+    const wWR = weak.length ? (weak.filter(h => h.trangThai === 'ĐÚNG').length / weak.length * 100).toFixed(1) : '-';
+
+    const html = `<!DOCTYPE html>
+    <html lang="vi">
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+    <title>META V13 - ${game.toUpperCase()}</title>
+    <style>
+      *{box-sizing:border-box}
+      body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0e27;color:#e6eef6;padding:12px;margin:0;}
+      .header{background:linear-gradient(135deg,#1e3a8a,#3b82f6);padding:16px;border-radius:14px;margin-bottom:14px;text-align:center;}
+      h1{color:#fff;font-size:20px;margin:0;font-weight:800;text-transform:uppercase}
+      .stat{margin-top:8px;font-size:13px;color:#fff}
+      .split{display:flex;gap:8px;margin-top:8px;justify-content:center;font-size:12px}
+      .split>div{background:rgba(0,0,0,.25);padding:6px 10px;border-radius:8px;}
+      .table-wrap{background:#0f172a;border-radius:12px;overflow-x:auto;border:1px solid #334155;}
+      table{width:100%;border-collapse:collapse;font-size:12px}
+      th{background:#1e40af;color:#fff;padding:10px 4px;font-size:10px;text-transform:uppercase;}
+      td{padding:10px 4px;text-align:center;border-bottom:1px solid #1e293b;}
+      .tai{color:#22c55e;font-weight:700}.xiu{color:#ef4444;font-weight:700}
+      .dung{color:#22c55e;font-weight:700}.sai{color:#ef4444;font-weight:700}.cho{color:#94a3b8;font-weight:600}
+      .dice{color:#fbbf24;font-weight:700;line-height:1.2}
+      .sum{display:inline-block;padding:4px 8px;border-radius:6px;background:#334155;color:#fbbf24;font-weight:800;font-size:13px}
+      .session{font-family:monospace;font-size:11px;color:#64748b}
+      .ti-le{font-size:12px;color:#cbd5e1;font-weight:600}
+      .ti-le.weak{color:#fbbf24;background:#78350f;padding:2px 6px;border-radius:4px;}
+      .ti-le.veryweak{color:#fca5a5;background:#7f1d1d;padding:2px 6px;border-radius:4px;}
+      .badge{display:inline-block;padding:4px 6px;border-radius:4px;font-size:10px;font-weight:700;white-space:nowrap;background:#334155;color:#cbd5e1}
+    </style>
+    <script>setTimeout(()=>location.reload(), 5000);</script>
+    </head>
+    <body>
+      <div class="header">
+        <h1>META V13 · ${game.toUpperCase()}</h1>
+        <div class="stat">Chính xác: <strong>${acc}%</strong> (${settled.length} phiên)</div>
+        <div class="split">
+          <div>🔥 Mạnh: <strong>${sWR}%</strong> (${strong.length})</div>
+          <div>⚠️ Yếu: <strong>${wWR}%</strong> (${weak.length})</div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>PHIÊN</th><th>XX</th><th>TỔNG</th><th>KQ</th><th>DỰ ĐOÁN</th><th>TỈ LỆ</th><th>LOẠI CẦU</th><th>TT</th></tr></thead>
+          <tbody>
+            ${rows.map(it => {
+              const dice = (it.xucXac || []).join('-').replace(/-/g, '-<br>');
+              const kq = it.ketQua === 'T' ? 'tai' : 'xiu';
+              const dd = it.DU_DOAN_CODE === 'T' ? 'tai' : 'xiu';
+              const tt = it.trangThai === 'ĐÚNG' ? 'dung' : (it.trangThai === 'SAI' ? 'sai' : 'cho');
+              const tC = it.veryWeak ? 'veryweak' : (it.weak ? 'weak' : '');
+              return `<tr>
+                <td class="session">${it.phien}</td><td class="dice">${dice}</td>
+                <td><span class="sum">${it.tong || ''}</span></td><td class="${kq}">${it.ketQuaLabel || ''}</td>
+                <td class="${dd}">${it.DU_DOAN || ''}</td>
+                <td><span class="ti-le ${tC}">${it.TI_LE}</span></td>
+                <td><span class="badge">${it.patternName}</span></td>
+                <td class="${tt}">${it.trangThai === 'ĐANG CHỜ' ? '...' : it.trangThai}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </body>
+    </html>`;
+    res.send(html);
+});
+
+app.listen(PORT, () => console.log(`🚀 META V13 - 120+ PATTERNS chạy port ${PORT}`));
