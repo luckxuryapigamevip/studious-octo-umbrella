@@ -1,7 +1,4 @@
 'use strict';
-// ============================================================
-// SICBO AI V61 ULTIMATE - AUTO FALLBACK B52 + FULL CẦU
-// ============================================================
 const express = require('express');
 const axios = require('axios');
 const fs = require('fs');
@@ -9,8 +6,6 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DB_DIR = process.env.DB_DIR || __dirname;
-const TICK_MS = 5000;
 
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -22,26 +17,39 @@ app.use((req, res, next) => {
 app.use(express.json());
 
 // ============================================================
-// 1. CẤU HÌNH API & WEIGHTS
+// 1. CẤU HÌNH API & HỆ THỐNG
 // ============================================================
 const API_MD5 = 'https://taixiumd5.maksh3979madfw.com/api/md5luckydice/GetSoiCau';
 const API_TX  = 'https://taixiu.maksh3979madfw.com/api/luckydice/GetSoiCau';
 const API_B52 = 'https://jakpotgwab.geightdors.net/glms/v1/notify/taixiu?platform_id=b5&gid=vgmn_101';
+
+const DB_DIR = process.env.DB_DIR || __dirname;
+const TICK_MS = 5000;
 
 const CONFIG = {
     WARMUP: { MIN_SESSIONS: 15, FULL_SESSIONS: 60, EFS_TARGET: 80 },
     ENV: { MIN_SAMPLES: 10 }
 };
 
+// Trọng số mặc định cho TẤT CẢ các loại cầu
 const DEFAULT_PATTERN_WEIGHTS = {
-  'cau_bet': 1.0, 'cau_dao_11': 1.0, 'cau_22': 1.0, 'cau_33': 1.0, 'cau_44': 1.0, 'cau_55': 1.0,
-  'cau_121': 1.0, 'cau_123': 1.0, 'cau_321': 1.0, 'cau_nhay_coc': 1.0, 'cau_nhip_nghieng': 1.0,
-  'cau_3van1': 1.0, 'cau_be_cau': 1.0, 'cau_chu_ky': 1.0, 'cau_gap': 1.0, 'cau_ziczac': 1.0,
-  'cau_doi': 1.0, 'cau_rong': 1.0, 'cau_212': 1.0, 'cau_1221': 1.0, 'cau_2112': 1.0,
-  'fibonacci': 1.0, 'golden_ratio': 1.0, 'resistance_support': 1.0, 'wave': 1.0,
-  'day_gay': 1.0, 'break_pattern': 1.0, 'smart_bet': 1.0, 'markov_chain': 1.2,
-  'distribution': 1.0, 'sum_trend': 1.0, 'momentum': 1.0, 'dice_trend_line': 1.0,
-  'cau_tu_nhien': 1.0
+    // Nhóm cầu cơ bản
+    'cau_bet': 1.0, 'cau_dao_11': 1.0, 'cau_rong': 1.0, 'cau_tu_nhien': 1.0,
+    // Nhóm cầu đối xứng & chu kỳ
+    'cau_22': 1.0, 'cau_33': 1.0, 'cau_44': 1.0, 'cau_55': 1.0,
+    'cau_121': 1.0, 'cau_212': 1.0, 'cau_123': 1.0, 'cau_321': 1.0,
+    'cau_1221': 1.0, 'cau_2112': 1.0, 'cau_chu_ky': 1.0,
+    // Nhóm cầu phức tạp
+    'cau_nhay_coc': 1.0, 'cau_nhip_nghieng': 1.0, 'cau_3van1': 1.0,
+    'cau_be_cau': 1.0, 'cau_gap': 1.0, 'cau_ziczac': 1.0,
+    'cau_doi': 1.0, 'cau_rong_bat_tan': 1.0, 'cau_bet_gay': 1.0,
+    // Nhóm thuật toán & thống kê
+    'markov_chain': 1.2, 'moving_avg_drift': 1.1, 'sum_pressure': 1.1,
+    'volatility': 1.0, 'distribution': 1.0, 'dice_pattern': 1.0,
+    'sum_trend': 1.0, 'edge_cases': 1.0, 'momentum': 1.0,
+    'dice_trend_line': 1.0, 'break_pattern': 1.0, 'fibonacci': 1.0,
+    'resistance_support': 1.0, 'wave': 1.0, 'golden_ratio': 1.0,
+    'smart_bet': 1.0
 };
 
 if (!fs.existsSync(DB_DIR)) { try { fs.mkdirSync(DB_DIR, { recursive: true }); } catch (e) {} }
@@ -54,25 +62,28 @@ function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
 const label = c => c === 'T' ? 'TÀI' : (c === 'X' ? 'XỈU' : null);
 const flip  = c => c === 'T' ? 'X'   : (c === 'X' ? 'T'   : null);
 
-function dbPath(g) { return path.join(DB_DIR, `db_v61_${g}.json`); }
+function dbPath(g) { return path.join(DB_DIR, `db_v52_${g}.json`); }
 function readDB(g) {
+    const p = dbPath(g);
     try {
-        if (fs.existsSync(dbPath(g))) {
-            const db = JSON.parse(fs.readFileSync(dbPath(g), 'utf8'));
-            if (!db.rawHistory) db.rawHistory = [];
+        if (fs.existsSync(p)) {
+            const db = JSON.parse(fs.readFileSync(p, 'utf8'));
             if (!db.weights) db.weights = {};
-            if (!db.history) db.history = [];
+            if (!db.streakStats) db.streakStats = { T: {}, X: {} };
+            if (!db.rawHistory) db.rawHistory = [];
+            if (!db.patternPerformance) db.patternPerformance = {};
             return db;
         }
     } catch (e) {}
-    return { rawHistory: [], weights: {}, history: [], envProfile: null };
+    return { history: [], lastSession: null, weights: {}, streakStats: { T: {}, X: {} }, envProfile: null, rawHistory: [], patternPerformance: {} };
 }
-function saveDB(g, db) { try { fs.writeFileSync(dbPath(g), JSON.stringify(db)); } catch (e) {} }
+function saveDB(g, db) { try { fs.writeFileSync(dbPath(g), JSON.stringify(db, null, 2)); } catch (e) {} }
 
 function getDice(it) { return [safeInt(it?.FirstDice), safeInt(it?.SecondDice), safeInt(it?.ThirdDice)]; }
 function getSum(it) { const s = getDice(it).reduce((a, b) => a + b, 0); return (s >= 3 && s <= 18) ? s : safeInt(it?.DiceSum); }
 function getResult(it) { const s = getSum(it); return (s >= 3 && s <= 18) ? (s >= 11 ? 'T' : 'X') : null; }
 
+// B52 Helpers
 function getB52Dice(it) { return [safeInt(it?.d1), safeInt(it?.d2), safeInt(it?.d3)]; }
 function getB52Sum(it) { return getB52Dice(it).reduce((a, b) => a + b, 0); }
 function getB52Result(it) {
@@ -82,13 +93,33 @@ function getB52Result(it) {
     return (s >= 11 && s <= 18) ? 'T' : 'X';
 }
 
+function updateStreakStats(seq, db) {
+    if (!db.streakStats) db.streakStats = { T: {}, X: {} };
+    let cur = seq[0], len = 1;
+    for (let i = 1; i < seq.length; i++) {
+        if (seq[i] === cur) len++;
+        else {
+            if (!db.streakStats[cur][len]) db.streakStats[cur][len] = { cont: 0, stop: 0 };
+            db.streakStats[cur][len].stop++;
+            for (let l = 1; l < len; l++) {
+                if (!db.streakStats[cur][l]) db.streakStats[cur][l] = { cont: 0, stop: 0 };
+                db.streakStats[cur][l].cont++;
+            }
+            cur = seq[i]; len = 1;
+        }
+    }
+}
+
 // ============================================================
-// 3. NHẬN DIỆN MÔI TRƯỜNG (ENV PROFILER)
+// 3. NHẬN DIỆN MÔI TRƯỜNG CỤC MẠNH (ENVIRONMENT PROFILER)
 // ============================================================
 function profileEnvironment(seq) {
     const L = seq.length;
-    if (L < CONFIG.ENV.MIN_SAMPLES) return { type: 'CHƯA_ĐỦ_DATA', confidence: 0, efs: 0, purity: 0, entropy: 1, dominant: null, availablePatterns: [], disabledPatterns: [], stats: { L: L } };
-    
+    if (L < CONFIG.ENV.MIN_SAMPLES) {
+        return { type: 'CHƯA_ĐỦ_DATA', confidence: 0, efs: 0, purity: 0, entropy: 1, dominant: null, availablePatterns: [], disabledPatterns: [], stats: { L: L } };
+    }
+
+    // 1. Phân tích phân phối & Entropy
     const tCount = seq.filter(x => x === 'T').length;
     const xCount = L - tCount;
     const balance = Math.abs(tCount - xCount) / L;
@@ -97,426 +128,544 @@ function profileEnvironment(seq) {
     if (pT > 0) entropy -= pT * Math.log2(pT);
     if (pX > 0) entropy -= pX * Math.log2(pX);
 
+    // 2. Phân tích Chuỗi (Streak)
     let streaks = [], cur = seq[0], len = 1;
     for (let i = 1; i < L; i++) {
         if (seq[i] === cur) len++;
-        else { streaks.push(len); cur = seq[i]; len = 1; }
+        else { streaks.push({ type: cur, len: len }); cur = seq[i]; len = 1; }
     }
-    streaks.push(len);
-    const maxStreak = Math.max(...streaks);
-    const streakRatio = streaks.filter(s => s >= 3).length / streaks.length;
-    const rec20 = seq.slice(-Math.min(20, L));
+    streaks.push({ type: cur, len: len });
+    const maxStreak = Math.max(...streaks.map(s => s.len));
+    const streakRatio = streaks.filter(s => s.len >= 3).length / streaks.length;
+
+    // 3. Phân tích Zigzag (Đảo nhịp)
+    const rec20 = seq.slice(-Math.min(30, L));
     let flips20 = 0;
     for (let i = 1; i < rec20.length; i++) if (rec20[i] !== rec20[i-1]) flips20++;
     const zigzagRatio = rec20.length > 1 ? flips20 / (rec20.length - 1) : 0;
 
+    // 4. Phân tích Chu kỳ (Pattern Repeating)
+    let maxCycle = 0;
+    for (let cycleLen = 2; cycleLen <= 6; cycleLen++) {
+        let match = 0;
+        for (let i = seq.length - cycleLen; i >= cycleLen; i--) {
+            if (seq[i] === seq[i - cycleLen]) match++; else break;
+        }
+        if (match > maxCycle) maxCycle = match;
+    }
+
+    // 5. Đánh giá Trạng thái Môi trường
     let type = 'HỖN_HỢP', confidence = 0.5;
     const purity = 1 - entropy;
-    
-    if (entropy > 0.90) { type = 'NHIỄU'; confidence = clamp((entropy - 0.90) * 10, 0, 1); }
-    else if (entropy < 0.50 && (streakRatio > 0.3 || maxStreak >= 4)) { type = 'BỆT'; confidence = clamp((0.5 - entropy) * 2, 0.5, 1); }
-    else if (zigzagRatio > 0.75 && entropy > 0.7) { type = 'ZIGZAG'; confidence = clamp((zigzagRatio - 0.75) * 4, 0.5, 1); }
 
-    const dominant = balance > 0.15 ? (tCount > xCount ? 'T' : 'X') : null;
+    if (entropy > 0.95) { 
+        type = 'NHIỄU_CAO'; confidence = clamp((entropy - 0.95) * 20, 0, 1); 
+    } else if (maxCycle >= 5) { 
+        type = 'CHU_KY'; confidence = clamp(maxCycle / 10, 0.6, 0.95); 
+    } else if (entropy < 0.45 && (streakRatio > 0.4 || maxStreak >= 5)) { 
+        type = 'BỆT_NẶNG'; confidence = clamp((0.5 - entropy) * 3, 0.6, 1); 
+    } else if (zigzagRatio > 0.8 && entropy > 0.85) { 
+        type = 'ZIGZAG'; confidence = clamp((zigzagRatio - 0.8) * 5, 0.6, 1); 
+    } else if (Math.abs(tCount - xCount) > L * 0.25) { 
+        type = 'XU_HUONG'; confidence = clamp(balance * 2, 0.5, 0.8); 
+    } else if (entropy < 0.7 && streakRatio > 0.2) { 
+        type = 'BỆT_NHẸ'; confidence = 0.6; 
+    }
+
+    // 6. Thiết lập Available/Disabled Patterns
+    const allPatterns = Object.keys(DEFAULT_PATTERN_WEIGHTS);
+    let available = [...allPatterns], disabled = [];
+
+    if (type === 'NHIỄU_CAO') {
+        disabled = ['cau_bet', 'cau_dao_11', 'cau_rong', 'cau_22', 'cau_33'];
+        available = ['markov_chain', 'break_pattern', 'smart_bet', 'distribution'];
+    } else if (type === 'BỆT_NẶNG' || type === 'BỆT_NHẸ') {
+        disabled = ['cau_dao_11', 'cau_ziczac', 'cau_121'];
+        available = ['cau_bet', 'cau_rong', 'cau_rong_bat_tan', 'cau_bet_gay'];
+    } else if (type === 'ZIGZAG') {
+        disabled = ['cau_bet', 'cau_rong', 'cau_3van1'];
+        available = ['cau_dao_11', 'cau_121', 'cau_212', 'cau_ziczac'];
+    } else if (type === 'CHU_KY') {
+        available = ['cau_chu_ky', 'cau_22', 'cau_33', 'cau_121', 'cau_123', 'cau_1221'];
+    }
+
+    // 7. Tính EFS (Environment Favorability Score)
     const dataVolume = clamp(L / CONFIG.WARMUP.FULL_SESSIONS, 0, 1);
     const efs = (dataVolume * 0.35 + purity * 0.30 + confidence * 0.20 + (1 - entropy) * 0.15) * 100;
 
-    const available = [], disabled = [];
-    if (type === 'NHIỄU') { disabled.push('cau_bet', 'cau_dao_11', 'cau_ziczac', 'cau_rong', 'cau_chu_ky'); available.push('markov_chain', 'break_pattern'); }
-    else if (type === 'BỆT') { available.push('cau_bet', 'cau_rong', 'day_gay'); disabled.push('cau_dao_11', 'cau_ziczac'); }
-    else if (type === 'ZIGZAG') { available.push('cau_dao_11', 'cau_ziczac', 'cau_nhay_coc'); disabled.push('cau_bet', 'cau_rong'); }
-    else { available.push(...Object.keys(DEFAULT_PATTERN_WEIGHTS)); }
+    const dominant = balance > 0.15 ? (tCount > xCount ? 'T' : 'X') : null;
 
-    return { type, confidence, efs: Math.round(efs*10)/10, purity, entropy, dominant, availablePatterns: available, disabledPatterns: disabled, stats: { L, tCount, xCount, maxStreak, zigzagRatio } };
+    return { 
+        type, confidence, efs: Math.round(efs*10)/10, purity, entropy, dominant, 
+        availablePatterns: available, disabledPatterns: disabled, 
+        stats: { L, tCount, xCount, maxStreak, zigzagRatio, maxCycle, streakRatio } 
+    };
 }
 
 // ============================================================
-// 4. SIÊU THUẬT TOÁN CẦU (50+ CẦU)
+// 4. TOÀN BỘ THUẬT TOÁN NHẬN DIỆN CẦU (PATTERN RECOGNITION)
 // ============================================================
 function getW(db, id) { return db.weights?.[id]?.w || 1.0; }
 
-function cauBet(r, db) {
-    if (r.length < 3) return null;
-    let t = r[0], len = 1;
-    for (let i = 1; i < r.length; i++) { if (r[i] === t) len++; else break; }
-    if (len >= 3) return { p: len >= 6 ? flip(t) : t, c: (len >= 6 ? 12 : 15) * getW(db, 'cau_bet'), n: `Bệt ${len}`, id: 'cau_bet' };
+// 4.1 Nhóm Cầu Cơ Bản
+function cauBet(results, db) {
+    if (results.length < 3) return null;
+    let streakType = results[0], len = 1;
+    for (let i = 1; i < results.length; i++) { if (results[i] === streakType) len++; else break; }
+    if (len >= 3) return { prediction: len >= 6 ? flip(streakType) : streakType, confidence: (len >= 6 ? 12 : 15) * getW(db, 'cau_bet'), name: `Bệt ${len}`, code: 'cau_bet' };
     return null;
 }
-function cauDao11(r, db) {
-    if (r.length < 4) return null;
+
+function cauDao11(results, db) {
+    if (results.length < 4) return null;
     let len = 1;
-    for (let i = 1; i < Math.min(r.length, 10); i++) { if (r[i] !== r[i - 1]) len++; else break; }
-    if (len >= 4) return { p: flip(r[0]), c: 14 * getW(db, 'cau_dao_11'), n: `Đảo 1-1`, id: 'cau_dao_11' };
+    for (let i = 1; i < Math.min(results.length, 10); i++) { if (results[i] !== results[i - 1]) len++; else break; }
+    if (len >= 4) return { prediction: flip(results[0]), confidence: 14 * getW(db, 'cau_dao_11'), name: `Đảo 1-1`, code: 'cau_dao_11' };
     return null;
 }
-function cau22(r, db) {
-    if (r.length < 6) return null;
-    let count = 0, i = 0, pat = [];
-    while (i < r.length - 1 && count < 4) {
-        if (r[i] === r[i + 1]) { pat.push(r[i]); count++; i += 2; } else break;
-    }
-    if (count >= 2 && pat.every((v, idx) => idx === 0 || v !== pat[idx - 1])) return { p: flip(pat[pat.length - 1]), c: 12 * getW(db, 'cau_22'), n: `2-2`, id: 'cau_22' };
-    return null;
-}
-function cau33(r, db) {
-    if (r.length < 6) return null;
-    let count = 0, i = 0, pat = [];
-    while (i < r.length - 2) {
-        if (r[i] === r[i + 1] && r[i + 1] === r[i + 2]) { pat.push(r[i]); count++; i += 3; } else break;
-    }
-    if (count >= 1) return { p: (r.length % 3 === 0) ? flip(pat[pat.length - 1]) : pat[pat.length - 1], c: 13 * getW(db, 'cau_33'), n: `3-3`, id: 'cau_33' };
-    return null;
-}
-function cau121(r, db) {
-    if (r.length < 4) return null;
-    const p = r.slice(0, 4);
-    if (p[0] !== p[1] && p[1] === p[2] && p[2] !== p[3] && p[0] === p[3]) return { p: p[0], c: 10 * getW(db, 'cau_121'), n: '1-2-1', id: 'cau_121' };
-    return null;
-}
-function cau123(r, db) {
-    if (r.length < 6) return null;
-    const f = r[5], n2 = r.slice(3, 5), l3 = r.slice(0, 3);
-    if (n2[0] === n2[1] && n2[0] !== f && l3.every(x => x === l3[0]) && l3[0] !== n2[0]) return { p: f, c: 11 * getW(db, 'cau_123'), n: '1-2-3', id: 'cau_123' };
-    return null;
-}
-function cau321(r, db) {
-    if (r.length < 6) return null;
-    const f3 = r.slice(3, 6), n2 = r.slice(1, 3), l1 = r[0];
-    if (f3.every(x => x === f3[0]) && n2.every(x => x === n2[0]) && f3[0] !== n2[0] && l1 !== n2[0]) return { p: n2[0], c: 12 * getW(db, 'cau_321'), n: '3-2-1', id: 'cau_321' };
-    return null;
-}
-function cauNhayCoc(r, db) {
-    if (r.length < 6) return null;
-    const skip = [];
-    for (let i = 0; i < Math.min(r.length, 12); i += 2) skip.push(r[i]);
-    if (skip.length >= 3) {
-        if (skip.slice(0, 3).every(x => x === skip[0])) return { p: skip[0], c: 8 * getW(db, 'cau_nhay_coc'), n: 'Nhảy Cóc', id: 'cau_nhay_coc' };
-        let alt = true;
-        for (let i = 1; i < skip.length - 1; i++) { if (skip[i] === skip[i - 1]) { alt = false; break; } }
-        if (alt) return { p: flip(skip[0]), c: 7 * getW(db, 'cau_nhay_coc'), n: 'Nhảy Cóc Đảo', id: 'cau_nhay_coc' };
-    }
-    return null;
-}
-function cauNhipNghieng(r, db) {
-    if (r.length < 5) return null;
-    const t5 = r.slice(0, 5).filter(x => x === 'T').length;
-    if (t5 >= 4) return { p: 'T', c: 9 * getW(db, 'cau_nhip_nghieng'), n: `Nghiêng 5T`, id: 'cau_nhip_nghieng' };
-    if (t5 <= 1) return { p: 'X', c: 9 * getW(db, 'cau_nhip_nghieng'), n: `Nghiêng 5X`, id: 'cau_nhip_nghieng' };
-    return null;
-}
-function cau3Van1(r, db) {
-    if (r.length < 4) return null;
-    const l4 = r.slice(0, 4), tC = l4.filter(x => x === 'T').length;
-    if (tC === 3 && l4[3] === 'X') return { p: 'T', c: 8 * getW(db, 'cau_3van1'), n: '3 Ván 1', id: 'cau_3van1' };
-    if (tC === 1 && l4[3] === 'T') return { p: 'X', c: 8 * getW(db, 'cau_3van1'), n: '3 Ván 1', id: 'cau_3van1' };
-    return null;
-}
-function cauBeCau(r, db) {
-    if (r.length < 5) return null;
+
+function cauRong(results, db) {
+    if (results.length < 6) return null;
     let len = 1;
-    for (let i = 1; i < r.length; i++) { if (r[i] === r[0]) len++; else break; }
-    if (len >= 4) return { p: flip(r[0]), c: 14 * getW(db, 'cau_be_cau'), n: `Bẻ Cầu ${len}`, id: 'cau_be_cau' };
+    for (let i = 1; i < results.length; i++) { if (results[i] === results[0]) len++; else break; }
+    if (len >= 6) return { prediction: flip(results[0]), confidence: Math.min(16, len + 8) * getW(db, 'cau_rong'), name: `Rồng ${len}`, code: 'cau_rong' };
     return null;
 }
-function cau44(r, db) {
-    if (r.length < 8) return null;
-    let c = 0, i = 0;
-    while (i < r.length - 3) {
-        if (r[i] === r[i+1] && r[i+1] === r[i+2] && r[i+2] === r[i+3]) { c++; i += 4; } else break;
-    }
-    if (c >= 1) return { p: flip(r[i-1]), c: 14 * getW(db, 'cau_44'), n: `4-4`, id: 'cau_44' };
+
+function cauTuNhien(results, db) {
+    const l10 = results.slice(0, Math.min(10, results.length));
+    const t = l10.filter(r => r === 'T').length;
+    return { prediction: t > l10.length/2 ? 'T' : 'X', confidence: 5 * getW(db, 'cau_tu_nhien'), name: 'Tự Nhiên', code: 'cau_tu_nhien' };
+}
+
+// 4.2 Nhóm Cầu Đối Xứng & Chu Kỳ
+function cau22(results, db) {
+    if (results.length < 5) return null;
+    const p = results.slice(0, 4).join('');
+    if (p === 'TTTT' || p === 'XXXX') return { prediction: p[0], confidence: 12 * getW(db, 'cau_22'), name: `Cầu 2-2`, code: 'cau_22' };
+    if (p === 'TTXX' || p === 'XXTT') return { prediction: p[0], confidence: 12 * getW(db, 'cau_22'), name: `Cầu 2-2 Đảo`, code: 'cau_22' };
     return null;
 }
-function cau55(r, db) {
-    if (r.length < 10) return null;
-    let c = 0, i = 0;
-    while (i < r.length - 4) {
-        if (r[i] === r[i+1] && r[i+1] === r[i+2] && r[i+2] === r[i+3] && r[i+3] === r[i+4]) { c++; i += 5; } else break;
-    }
-    if (c >= 1) return { p: flip(r[i-1]), c: 15 * getW(db, 'cau_55'), n: `5-5`, id: 'cau_55' };
+
+function cau33(results, db) {
+    if (results.length < 6) return null;
+    const p = results.slice(0, 6).join('');
+    if (p === 'TTTXXX' || p === 'XXXTTT') return { prediction: p[0], confidence: 12 * getW(db, 'cau_33'), name: `Cầu 3-3`, code: 'cau_33' };
     return null;
 }
-function cau212(r, db) {
-    if (r.length < 5) return null;
-    const p = r.slice(0, 5);
-    if (p[0] === p[1] && p[1] !== p[2] && p[2] === p[3] && p[3] !== p[4] && p[0] !== p[2]) return { p: flip(p[0]), c: 10 * getW(db, 'cau_212'), n: '2-1-2', id: 'cau_212' };
+
+function cau121(results, db) {
+    if (results.length < 5) return null;
+    const p = results.slice(0, 5).join('');
+    if (p === 'TXXTT' || p === 'XTTXX') return { prediction: flip(results[0]), confidence: 13 * getW(db, 'cau_121'), name: `Cầu 1-2-1`, code: 'cau_121' };
     return null;
 }
-function cau1221(r, db) {
-    if (r.length < 6) return null;
-    const p = r.slice(0, 6);
-    if (p[0] !== p[1] && p[1] === p[2] && p[2] === p[3] && p[3] !== p[4] && p[4] === p[5] && p[0] !== p[1]) return { p: p[0], c: 11 * getW(db, 'cau_1221'), n: '1-2-2-1', id: 'cau_1221' };
-    return null;
-}
-function cau2112(r, db) {
-    if (r.length < 6) return null;
-    const p = r.slice(0, 6);
-    if (p[0] === p[1] && p[1] !== p[2] && p[2] === p[3] && p[3] !== p[4] && p[4] === p[5] && p[0] !== p[2]) return { p: p[0], c: 11 * getW(db, 'cau_2112'), n: '2-1-1-2', id: 'cau_2112' };
-    return null;
-}
-function cauGap(r, db) {
-    if (r.length < 6) return null;
-    for (let g = 2; g <= 3; g++) {
-        let found = true, ref = r[0];
-        for (let i = 0; i < Math.min(r.length, 12); i += (g + 1)) if (r[i] !== ref) { found = false; break; }
-        if (found) return { p: ref, c: 9 * getW(db, 'cau_gap'), n: `Gấp ${g+1}`, id: 'cau_gap' };
+
+function cauChuKy(results, db) {
+    if (results.length < 6) return null;
+    for (let cLen = 2; cLen <= 4; cLen++) {
+        if (results.length < cLen * 2) continue;
+        const p1 = results.slice(0, cLen).join('');
+        const p2 = results.slice(cLen, cLen * 2).join('');
+        if (p1 === p2) {
+            return { prediction: results[cLen * 2], confidence: 14 * getW(db, 'cau_chu_ky'), name: `Chu Kỳ ${cLen}`, code: 'cau_chu_ky' };
+        }
     }
     return null;
 }
-function cauZiczac(r, db) {
-    if (r.length < 8) return null;
-    let c = 0;
-    for (let i = 0; i < r.length - 2; i++) { if (r[i] !== r[i+1] && r[i+1] !== r[i+2] && r[i] === r[i+2]) c++; else break; }
-    if (c >= 3) return { p: flip(r[0]), c: 13 * getW(db, 'cau_ziczac'), n: `Ziczac (${c})`, id: 'cau_ziczac' };
+
+// 4.3 Nhóm Cầu Phức Tạp
+function cauNhayCoc(results, db) {
+    if (results.length < 5) return null;
+    let flips = 0;
+    for (let i = 1; i < results.length; i++) if (results[i] !== results[i-1]) flips++;
+    if (flips >= results.length - 1) return { prediction: flip(results[0]), confidence: 10 * getW(db, 'cau_nhay_coc'), name: 'Nhảy Cóc', code: 'cau_nhay_coc' };
     return null;
 }
-function cauDoi(r, db) {
-    if (r.length < 4) return null;
-    let c = 0, i = 0;
-    while (i < r.length - 1) { if (r[i] === r[i+1]) { c++; i += 2; } else break; }
-    if (c >= 2) return { p: r[0] !== r[2] ? flip(r[0]) : r[0], c: 12 * getW(db, 'cau_doi'), n: `Đôi (${c})`, id: 'cau_doi' };
+
+function cau3Van1(results, db) {
+    if (results.length < 6) return null;
+    const p = results.slice(0, 6).join('');
+    if (p === 'TTTXXX' || p === 'XXXTTT') return { prediction: p[0], confidence: 13 * getW(db, 'cau_3van1'), name: '3 Ván 1', code: 'cau_3van1' };
     return null;
 }
-function cauRong(r, db) {
-    if (r.length < 6) return null;
-    let len = 1;
-    for (let i = 1; i < r.length; i++) { if (r[i] === r[0]) len++; else break; }
-    if (len >= 6) return { p: flip(r[0]), c: Math.min(16, len + 8) * getW(db, 'cau_rong'), n: `Rồng ${len}`, id: 'cau_rong' };
-    return null;
-}
-function smartBet(r, db) {
-    if (r.length < 10) return null;
-    const l5 = r.slice(0, 5), p5 = r.slice(5, 10);
-    const t5 = l5.filter(x => x === 'T').length, tp5 = p5.filter(x => x === 'T').length;
-    if ((t5 >= 4 && tp5 <= 1) || (t5 <= 1 && tp5 >= 4)) return { p: flip(t5 >= 4 ? 'T' : 'X'), c: 13 * getW(db, 'smart_bet'), n: 'Đảo Xu Hướng', id: 'smart_bet' };
-    const t10 = r.slice(0, 10).filter(x => x === 'T').length;
-    if (t10 >= 8 || t10 <= 2) return { p: flip(t10 >= 8 ? 'T' : 'X'), c: 12 * getW(db, 'smart_bet'), n: 'Xu Hướng Cực', id: 'smart_bet' };
-    return null;
-}
-function cauChuKy(r, db) {
-    if (r.length < 12) return null;
-    for (let len = 2; len <= 6; len++) {
-        let ok = true, p = r.slice(0, len);
-        for (let i = len; i < Math.min(len * 3, r.length); i++) if (r[i] !== p[i % len]) { ok = false; break; }
-        if (ok) return { p: p[r.length % len], c: 9 * getW(db, 'cau_chu_ky'), n: `Chu Kỳ ${len}`, id: 'cau_chu_ky' };
+
+function cauBeCau(results, db) {
+    if (results.length < 8) return null;
+    let streak = results[0], len = 1;
+    for (let i = 1; i < results.length; i++) { if (results[i] === streak) len++; else break; }
+    if (len >= 4 && results[len] === flip(streak)) {
+        return { prediction: streak, confidence: 11 * getW(db, 'cau_be_cau'), name: 'Bẻ Cầu', code: 'cau_be_cau' };
     }
     return null;
 }
-function cauTuNhien(r, db) {
-    const l10 = r.slice(0, Math.min(10, r.length));
-    const t = l10.filter(x => x === 'T').length;
-    return { p: t > l10.length/2 ? 'T' : 'X', c: 5 * getW(db, 'cau_tu_nhien'), n: 'Tự Nhiên', id: 'cau_tu_nhien' };
+
+// 4.4 Nhóm Thuật Toán & Thống Kê
+function markovChain(results, db) {
+    if (results.length < 5) return null;
+    const transitions = { TT: 0, TX: 0, XT: 0, XX: 0 };
+    for (let i = 1; i < results.length; i++) {
+        const key = results[i-1] + results[i];
+        if (transitions[key] !== undefined) transitions[key]++;
+    }
+    const last = results[0];
+    const nextT = transitions[last + 'T'];
+    const nextX = transitions[last + 'X'];
+    const pred = nextT > nextX ? 'T' : (nextX > nextT ? 'X' : last);
+    const conf = clamp(Math.abs(nextT - nextX) / Math.max(nextT + nextX, 1) * 15, 5, 18);
+    return { prediction: pred, confidence: conf * getW(db, 'markov_chain'), name: 'Markov Chain', code: 'markov_chain' };
+}
+
+function movingAvgDrift(results, db) {
+    if (results.length < 10) return null;
+    const last5 = results.slice(0, 5);
+    const next5 = results.slice(5, 10);
+    const avgLast = last5.filter(r => r === 'T').length / 5;
+    const avgNext = next5.filter(r => r === 'T').length / 5;
+    const drift = avgLast - avgNext;
+    if (Math.abs(drift) > 0.4) {
+        const pred = drift > 0 ? 'X' : 'T';
+        return { prediction: pred, confidence: 9 * getW(db, 'moving_avg_drift'), name: 'Moving Avg Drift', code: 'moving_avg_drift' };
+    }
+    return null;
+}
+
+function fibonacciPattern(results, db) {
+    if (results.length < 8) return null;
+    const fib = [1, 2, 3, 5, 8];
+    let match = 0;
+    let curType = results[0], curLen = 1;
+    for (let i = 1; i < results.length; i++) {
+        if (results[i] === curType) curLen++;
+        else {
+            if (fib.includes(curLen)) match++;
+            curType = results[i]; curLen = 1;
+        }
+    }
+    if (match >= 2) return { prediction: flip(results[0]), confidence: 8 * getW(db, 'fibonacci'), name: 'Fibonacci', code: 'fibonacci' };
+    return null;
+}
+
+function resistanceSupport(results, db) {
+    if (results.length < 6) return null;
+    const last = results[0];
+    let touches = 0;
+    for (let i = 1; i < results.length; i++) if (results[i] === last) touches++;
+    if (touches >= 3) return { prediction: flip(last), confidence: 10 * getW(db, 'resistance_support'), name: 'Kháng Cự/Hỗ Trợ', code: 'resistance_support' };
+    return null;
+}
+
+function goldenRatio(results, db) {
+    if (results.length < 10) return null;
+    const t = results.filter(r => r === 'T').length;
+    const ratio = t / results.length;
+    if (ratio > 0.618) return { prediction: 'X', confidence: 7 * getW(db, 'golden_ratio'), name: 'Tỷ Lệ Vàng', code: 'golden_ratio' };
+    if (ratio < 0.382) return { prediction: 'T', confidence: 7 * getW(db, 'golden_ratio'), name: 'Tỷ Lệ Vàng', code: 'golden_ratio' };
+    return null;
+}
+
+function smartBet(results, db) {
+    if (results.length < 15) return null;
+    let tCount = 0, xCount = 0;
+    for (let i = 0; i < results.length; i++) {
+        if (results[i] === 'T') tCount++; else xCount++;
+        if (i >= 3 && tCount === 3 && xCount === 0) return { prediction: 'X', confidence: 12 * getW(db, 'smart_bet'), name: 'Smart Bet', code: 'smart_bet' };
+        if (i >= 3 && xCount === 3 && tCount === 0) return { prediction: 'T', confidence: 12 * getW(db, 'smart_bet'), name: 'Smart Bet', code: 'smart_bet' };
+    }
+    return null;
 }
 
 // ============================================================
-// 5. TỔNG HỢP KHÔNG THIÊN VỊ
+// 5. TỔNG HỢP ENSEMBLE (TRỌNG SỐ ĐỘNG)
 // ============================================================
-function runUnbiasedEnsemble(seq, db, env) {
+function runUnbiasedEnsemble(seq, sums, db, env) {
     const disabled = new Set(env.disabledPatterns);
-    let vT = [], vX = [];
-    const last = seq[seq.length - 1];
-    let streak = 1;
-    for (let i = seq.length - 2; i >= 0; i--) { if (seq[i] === last) streak++; else break; }
+    let votesT = [], votesX = [], details = [];
+    const last = seq[0]; // Mảng seq được truyền vào đã đảo ngược (mới nhất ở đầu)
 
+    // Đăng ký tất cả các hàm cầu
     const funcs = [
-        cauBet, cauDao11, cau22, cau33, cau121, cau123, cau321, cauNhayCoc, cauNhipNghieng,
-        cau3Van1, cauBeCau, cau44, cau55, cau212, cau1221, cau2112, cauGap, cauZiczac,
-        cauDoi, cauRong, smartBet, cauChuKy
+        cauBet, cauDao11, cauRong, cau22, cau33, cau121, cauChuKy,
+        cauNhayCoc, cau3Van1, cauBeCau, markovChain, movingAvgDrift,
+        fibonacciPattern, resistanceSupport, goldenRatio, smartBet
     ];
 
     for (const fn of funcs) {
-        let res = null; try { res = fn(seq, db); } catch (e) {}
-        if (!res || disabled.has(res.id)) continue;
-
-        const baseW = DEFAULT_PATTERN_WEIGHTS[res.id] || 1.0;
-        const learnedW = db.weights?.[res.id]?.w || 1.0;
+        let res = null; 
+        try { res = fn(seq, db); } catch (e) {}
+        if (!res || disabled.has(res.code)) continue;
         
-        let penalty = 1.0;
-        if (streak >= 3) penalty = (res.p === last) ? 0.5 : 1.5;
-
-        const vote = (res.c / 100) * baseW * learnedW * penalty;
-        if (res.p === 'T') vT.push({ vote, name: res.n });
-        else vX.push({ vote, name: res.n });
+        // Lấy trọng số động từ DB (nếu có), nếu không dùng mặc định
+        const dynW = db.patternPerformance?.[res.code]?.w || 1.0;
+        const baseW = DEFAULT_PATTERN_WEIGHTS[res.code] || 1.0;
+        const finalW = dynW * baseW;
+        
+        const vote = (res.confidence / 100) * finalW;
+        if (res.prediction === 'T') votesT.push({ vote, name: res.name, code: res.code });
+        else votesX.push({ vote, name: res.name, code: res.code });
+        details.push({ algo: res.code, code: res.prediction, name: res.name, vote });
     }
 
-    if (vT.length === 0 && vX.length === 0) {
+    // Fallback nếu không có cầu nào hoạt động
+    if (votesT.length === 0 && votesX.length === 0) {
         const fb = cauTuNhien(seq, db);
-        if (fb.p === 'T') vT.push({ vote: 0.05, name: fb.n });
-        else vX.push({ vote: 0.05, name: fb.n });
+        if (fb.prediction === 'T') votesT.push({ vote: 0.05, name: fb.name, code: fb.code });
+        else votesX.push({ vote: 0.05, name: fb.name, code: fb.code });
+        details.push({ algo: 'cau_tu_nhien', code: fb.prediction, name: fb.name, vote: 0.05 });
     }
 
-    const sT = vT.reduce((a, b) => a + b.vote, 0) / (vT.length || 1);
-    const sX = vX.reduce((a, b) => a + b.vote, 0) / (vX.length || 1);
+    const cT = votesT.length, cX = votesX.length;
+    const sT = votesT.reduce((a, b) => a + b.vote, 0);
+    const sX = votesX.reduce((a, b) => a + b.vote, 0);
+    const scoreT = cT > 0 ? sT / cT : 0;
+    const scoreX = cX > 0 ? sX / cX : 0;
 
-    let winner = sT > sX ? 'T' : 'X';
-    let diff = Math.abs(sT - sX) / Math.max(sT, sX, 0.001);
-    
-    if (diff < 0.05) { winner = flip(last); diff = 0.05; }
-    let confidence = 0.51 + diff * 0.2;
-    
-    if (env.stats.L < 15) confidence = clamp(0.51, 0.55);
-    else if (env.efs < 80) confidence = Math.min(confidence, 0.59);
-    else confidence = Math.min(confidence * 1.1, 0.85);
+    let winner, confidence, patternName;
 
-    const patternName = (winner === 'T' ? vT : vX).sort((a,b)=>b.vote-a.vote)[0]?.name || 'META';
-    return { code: winner, label: patternName, tiLe: (confidence*100).toFixed(1)+'%', confidence };
+    if (Math.abs(scoreT - scoreX) < 0.02) {
+        winner = flip(last); confidence = 0.515; patternName = 'HÒA-BẺ-CẦU';
+    } else {
+        winner = scoreT > scoreX ? 'T' : 'X';
+        const diff = Math.abs(scoreT - scoreX) / Math.max(scoreT, scoreX);
+        if (diff < 0.05) {
+            winner = flip(last); confidence = 0.52; patternName = 'BẺ-CẦU-NHIỄU';
+        } else {
+            confidence = clamp(0.5 + diff * 0.5, 0.5, 0.88);
+            patternName = (winner === 'T' ? votesT : votesX).sort((a,b)=>b.vote-a.vote)[0].name;
+        }
+    }
+
+    // Áp dụng Warm-up / EFS
+    if (env.stats.L < CONFIG.WARMUP.MIN_SESSIONS) confidence = clamp(0.51 + (confidence - 0.5) * 0.5, 0.51, 0.55);
+    else if (env.efs < CONFIG.WARMUP.EFS_TARGET) confidence = clamp(Math.min(confidence, 0.51 + (env.efs / 80) * 0.08), 0.51, 0.59);
+    else confidence = clamp(confidence * (1 + ((env.efs - 80) / 20) * 0.1), 0.51, 0.88);
+
+    return { code: winner, label: patternName, tiLe: (confidence*100).toFixed(1)+'%', confidence, details, phase: confidence < 0.60 ? 'WARMING_UP' : 'READY' };
 }
 
 // ============================================================
-// 6. FETCH & XỬ LÝ (CƠ CHẾ FALLBACK B52)
+// 6. FETCH & PROCESS
 // ============================================================
 async function fetchApi(url) {
-    try { 
-        const res = await axios.get(url, { timeout: 8000 }); 
-        return res.data?.data?.list || res.data?.list || res.data?.data || []; 
+    try {
+        const res = await axios.get(url, { timeout: 8000 });
+        let arr = res.data?.data?.list || res.data?.list || res.data?.data || (Array.isArray(res.data) ? res.data : []);
+        if (arr.length >= 2 && Number(arr[0].SessionId) > Number(arr[arr.length - 1].SessionId)) arr.reverse();
+        return arr;
     } catch (e) { return []; }
 }
 
 async function fetchB52() {
-    try { 
-        const res = await axios.get(API_B52, { timeout: 8000 }); 
-        return res.data?.data || []; 
-    } catch (e) { return []; }
+    try {
+        const res = await axios.get(API_B52, { timeout: 8000 });
+        if (!res.data || !res.data.data || !Array.isArray(res.data.data) || res.data.data.length === 0) return null;
+        return res.data.data[0];
+    } catch (e) { return null; }
 }
 
 async function processGame(game) {
-    try {
-        const db = readDB(game);
-        let seq = [];
-        let list = [];
+    const db = readDB(game);
+    let currentSeq = [];
+    let currentSums = [];
+    let latest = null;
 
-        if (game === 'b52') {
-            list = await fetchB52();
-            if (!list || !list.length) return;
-            const latest = list[0];
-            const sid = safeInt(latest.sid);
-
-            if (!db.rawHistory.find(x => x.sid === sid)) {
-                db.rawHistory.push({ sid, d1: safeInt(latest.d1), d2: safeInt(latest.d2), d3: safeInt(latest.d3), result: getB52Result(latest) });
-                if (db.rawHistory.length > 100) db.rawHistory.shift();
-                saveDB(game, db);
-            }
-            seq = db.rawHistory.map(x => x.result);
-        } else {
-            list = await fetchApi(game === 'md5' ? API_MD5 : API_TX);
-            if (!list || !list.length) return;
-            seq = list.map(getResult).filter(Boolean);
-            
-            const session = safeInt(list[list.length - 1].SessionId);
-            if (db.lastSession === session) return;
-            db.lastSession = session;
-            db.rawHistory = seq.map(r => ({ result: r }));
-        }
-
-        if (seq.length < 15) { saveDB(game, db); return; }
-
-        const env = profileEnvironment(seq);
-        const pred = runUnbiasedEnsemble(seq, db, env);
+    if (game === 'b52') {
+        const latestB52 = await fetchB52();
+        if (!latestB52) return;
         
-        const currentSid = game === 'b52' ? db.rawHistory[db.rawHistory.length - 1].sid : safeInt(list[list.length - 1].SessionId);
-        const lastHist = db.history.length > 0 ? db.history[db.history.length - 1] : null;
-
-        if (!lastHist || lastHist.phien < currentSid) {
-            db.history.push({ 
-                phien: currentSid, 
-                xucXac: game === 'b52' ? getB52Dice(list[0]) : getDice(list[list.length - 1]),
-                tong: game === 'b52' ? getB52Sum(list[0]) : getSum(list[list.length - 1]),
-                duDoan: label(pred.code), 
-                tiLe: pred.tiLe, 
-                patternName: pred.label, 
-                envType: env.type 
+        latest = latestB52;
+        const sid = safeInt(latest.sid);
+        
+        // 1. Cập nhật DB nếu có phiên mới
+        if (!db.rawHistory.find(x => x.sid === sid)) {
+            db.rawHistory.push({
+                sid: sid,
+                d1: safeInt(latest.d1), d2: safeInt(latest.d2), d3: safeInt(latest.d3),
+                result: getB52Result(latest)
             });
-            if (db.history.length > 50) db.history.shift();
+            if (db.rawHistory.length > 500) db.rawHistory.shift();
             saveDB(game, db);
         }
-    } catch (e) { }
+
+        // 2. Chuẩn bị dữ liệu cho dự đoán (Đảo ngược để mới nhất ở đầu)
+        currentSeq = db.rawHistory.map(x => x.result).reverse();
+        currentSums = db.rawHistory.map(x => x.d1 + x.d2 + x.d3).reverse();
+
+        // 3. Chấm điểm phiên trước
+        const prev = db.history[db.history.length - 1];
+        if (prev && prev.DU_DOAN_CODE && prev.trangThai === 'ĐANG CHỜ' && prev.phien < sid) {
+            const actual = getB52Result(latest);
+            prev.trangThai = prev.DU_DOAN_CODE === actual ? 'ĐÚNG' : 'SAI';
+            
+            // Cập nhật hiệu suất động cho các cầu đã vote
+            if (prev.algoDetails) {
+                for (const algo of prev.algoDetails) {
+                    if (!db.patternPerformance[algo.algo]) db.patternPerformance[algo.algo] = { win: 0, lose: 0, w: 1.0 };
+                    if (algo.code === actual) db.patternPerformance[algo.algo].win++;
+                    else db.patternPerformance[algo.algo].lose++;
+                    
+                    const pp = db.patternPerformance[algo.algo];
+                    const total = pp.win + pp.lose;
+                    if (total >= 10) {
+                        const winrate = pp.win / total;
+                        // Trọng số dao động từ 0.5 đến 1.5 dựa trên winrate
+                        pp.w = clamp(0.5 + (winrate - 0.5) * 2, 0.5, 1.5);
+                    }
+                }
+            }
+            saveDB(game, db);
+        }
+
+        // 4. Dự đoán nếu đủ dữ liệu
+        if (currentSeq.length >= 15) {
+            updateStreakStats(currentSeq, db);
+            const env = profileEnvironment(currentSeq);
+            db.envProfile = env;
+            const pred = runUnbiasedEnsemble(currentSeq, currentSums, db, env);
+
+            const lastHistory = db.history[db.history.length - 1];
+            if (!lastHistory || lastHistory.phien < sid) {
+                db.history.push({
+                    phien: sid,
+                    xucXac: getB52Dice(latest),
+                    tong: getB52Sum(latest),
+                    ketQua: getB52Result(latest),
+                    ketQuaLabel: label(getB52Result(latest)),
+                    phienDuDoan: sid + 1,
+                    DU_DOAN_CODE: pred.code, DU_DOAN: label(pred.code),
+                    TI_LE: pred.tiLe, patternName: pred.label, algoDetails: pred.details,
+                    phase: pred.phase, envType: env.type, trangThai: 'ĐANG CHỜ'
+                });
+                if (db.history.length > 500) db.history.shift();
+                saveDB(game, db);
+            }
+        }
+        return;
+    }
+
+    // Xử lý MD5 & TAIXIU
+    const list = await fetchApi(game === 'md5' ? API_MD5 : API_TX);
+    if (!list || !list.length) return;
+    latest = list[list.length - 1];
+    currentSeq = list.map(getResult).filter(Boolean).reverse(); // Đảo ngược
+    currentSums = list.map(getSum).filter(s => s >= 3 && s <= 18).reverse();
+    
+    const session = safeInt(latest.SessionId);
+    if (db.lastSession === session) return;
+    db.lastSession = session;
+
+    if (currentSeq.length < 15) { saveDB(game, db); return; }
+
+    updateStreakStats(currentSeq, db);
+    const env = profileEnvironment(currentSeq);
+    db.envProfile = env;
+
+    const pred = runUnbiasedEnsemble(currentSeq, currentSums, db, env);
+
+    const prev = db.history[db.history.length - 1];
+    if (prev && prev.DU_DOAN_CODE && prev.trangThai === 'ĐANG CHỜ' && prev.phien < session) {
+        const actual = getResult(latest);
+        prev.trangThai = prev.DU_DOAN_CODE === actual ? 'ĐÚNG' : 'SAI';
+        
+        if (prev.algoDetails) {
+            for (const algo of prev.algoDetails) {
+                if (!db.patternPerformance[algo.algo]) db.patternPerformance[algo.algo] = { win: 0, lose: 0, w: 1.0 };
+                if (algo.code === actual) db.patternPerformance[algo.algo].win++;
+                else db.patternPerformance[algo.algo].lose++;
+                
+                const pp = db.patternPerformance[algo.algo];
+                const total = pp.win + pp.lose;
+                if (total >= 10) {
+                    const winrate = pp.win / total;
+                    pp.w = clamp(0.5 + (winrate - 0.5) * 2, 0.5, 1.5);
+                }
+            }
+        }
+    }
+
+    db.history.push({
+        phien: session,
+        xucXac: getDice(latest),
+        tong: getSum(latest),
+        ketQua: getResult(latest),
+        ketQuaLabel: label(getResult(latest)),
+        phienDuDoan: session + 1,
+        DU_DOAN_CODE: pred.code, DU_DOAN: label(pred.code),
+        TI_LE: pred.tiLe, patternName: pred.label, algoDetails: pred.details,
+        phase: pred.phase, envType: env.type, trangThai: 'ĐANG CHỜ'
+    });
+
+    if (db.history.length > 500) db.history.shift();
+    saveDB(game, db);
 }
 
-setInterval(() => { processGame('md5'); processGame('taixiu'); processGame('b52'); }, TICK_MS);
+setInterval(() => { 
+    processGame('md5'); 
+    processGame('taixiu'); 
+    processGame('b52'); 
+}, TICK_MS);
 
 // ============================================================
-// 7. ROUTE API JSON (TỰ ĐỘNG FALLBACK)
+// 7. ROUTERS & API
 // ============================================================
-function buildJsonResponse(gameName, db, env, pred, note = "") {
+function buildJsonResponse(game, db, env, pred) {
+    const settled = db.history.filter(h => h.trangThai === 'ĐÚNG' || h.trangThai === 'SAI');
+    const win = settled.filter(h => h.trangThai === 'ĐÚNG').length;
+    const lose = settled.filter(h => h.trangThai === 'SAI').length;
     const duDoanText = pred ? label(pred.code) : null;
     const latestHist = db.history[db.history.length - 1] || {};
 
     return {
         status: "success",
         data: {
-            game: gameName,
             phienHienTai: latestHist.phien || "0",
-            phienDuDoan: latestHist.phien ? latestHist.phien + 1 : "0",
+            phienDuDoan: latestHist.phienDuDoan || "0",
             duDoan: duDoanText, 
             tiLe: pred ? pred.tiLe : "—",
-            liDo: pred ? `⭐ ${pred.label} → ${duDoanText} (${pred.tiLe}) ${note}` : `⏳ Đang quét ${env.stats.L}/15 phiên...`,
+            liDo: pred ? `⭐ ${pred.label} → ${duDoanText} (${pred.tiLe})` : `⏳ Đang quét ${env.stats?.L || 0}/15 phiên...`,
             xucXac: latestHist.xucXac || [],
             tongDiem: latestHist.tong || 0,
-            moiTruong: { loai: env.type, efs: env.efs + '%' }
+            moiTruong: {
+                loai: env.type,
+                doTinCay: (env.confidence || 0).toFixed(2),
+                efs: (env.efs || 0) + "%",
+                doTinhKhiet: ((env.purity || 0)*100).toFixed(1) + "%",
+                doNhieu: ((env.entropy || 1)*100).toFixed(1) + "%",
+                nghieng: env.dominant ? label(env.dominant) : "CÂN BẰNG"
+            },
+            chiTietModel: {
+                pattern: pred ? pred.label : '—',
+                phase: pred ? pred.phase : 'WARMUP'
+            },
+            thongKe: { win, lose, winrate: settled.length ? ((win/settled.length)*100).toFixed(1)+'%' : '—', bankroll: (1000 + win*10 - lose*10) + '$' }
         }
     };
 }
 
-// B52
 app.get('/b52', async (req, res) => {
-    try {
-        const db = readDB('b52');
-        const seq = db.rawHistory.map(x => x.result);
-        const env = db.envProfile || profileEnvironment(seq);
-        const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, db, env) : null;
-        res.json(buildJsonResponse("B52", db, env, pred));
-    } catch (e) { res.status(500).json({ status: "error", message: e.message }); }
+    const db = readDB('b52');
+    const seq = db.rawHistory.map(x => x.result).reverse();
+    const env = db.envProfile || profileEnvironment(seq);
+    const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, [], db, env) : null;
+    res.json(buildJsonResponse('b52', db, env, pred));
 });
 
-// Taixiu & MD5: Nếu API chết, tự động lấy B52
 app.get('/taixiu', async (req, res) => {
-    try {
-        const db = readDB('taixiu');
-        const list = await fetchApi(API_TX);
-        
-        if (!list || !list.length) {
-            // FALLBACK B52
-            const dbB52 = readDB('b52');
-            const seqB52 = dbB52.rawHistory.map(x => x.result);
-            const envB52 = dbB52.envProfile || profileEnvironment(seqB52);
-            const predB52 = seqB52.length >= 15 ? runUnbiasedEnsemble(seqB52, dbB52, envB52) : null;
-            return res.json(buildJsonResponse("TAIXIU (Fallback B52)", dbB52, envB52, predB52, "[API TX bị chặn, dùng B52 thay thế]"));
-        }
-        
-        const seq = list.map(getResult).filter(Boolean);
-        const env = profileEnvironment(seq);
-        const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, db, env) : null;
-        
-        const latest = list[list.length - 1];
-        db.history = [{ phien: safeInt(latest.SessionId), xucXac: getDice(latest), tong: getSum(latest) }];
-        res.json(buildJsonResponse("TAIXIU", db, env, pred));
-    } catch (e) { res.status(500).json({ status: "error", message: e.message }); }
+    const db = readDB('taixiu');
+    const env = db.envProfile || { type: 'CHƯA CÓ', confidence: 0, efs: 0, purity: 0, entropy: 1, dominant: null, stats: {L:0} };
+    const seq = (db.rawHistory || []).map(x => x.result).reverse();
+    const pred = db.history.length >= 15 ? runUnbiasedEnsemble(seq, [], db, env) : null;
+    res.json(buildJsonResponse('taixiu', db, env, pred));
 });
 
 app.get('/md5', async (req, res) => {
-    try {
-        const db = readDB('md5');
-        const list = await fetchApi(API_MD5);
-        
-        if (!list || !list.length) {
-            // FALLBACK B52
-            const dbB52 = readDB('b52');
-            const seqB52 = dbB52.rawHistory.map(x => x.result);
-            const envB52 = dbB52.envProfile || profileEnvironment(seqB52);
-            const predB52 = seqB52.length >= 15 ? runUnbiasedEnsemble(seqB52, dbB52, envB52) : null;
-            return res.json(buildJsonResponse("MD5 (Fallback B52)", dbB52, envB52, predB52, "[API MD5 bị chặn, dùng B52 thay thế]"));
-        }
-        
-        const seq = list.map(getResult).filter(Boolean);
-        const env = profileEnvironment(seq);
-        const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, db, env) : null;
-        
-        const latest = list[list.length - 1];
-        db.history = [{ phien: safeInt(latest.SessionId), xucXac: getDice(latest), tong: getSum(latest) }];
-        res.json(buildJsonResponse("MD5", db, env, pred));
-    } catch (e) { res.status(500).json({ status: "error", message: e.message }); }
+    const db = readDB('md5');
+    const env = db.envProfile || { type: 'CHƯA CÓ', confidence: 0, efs: 0, purity: 0, entropy: 1, dominant: null, stats: {L:0} };
+    const seq = (db.rawHistory || []).map(x => x.result).reverse();
+    const pred = db.history.length >= 15 ? runUnbiasedEnsemble(seq, [], db, env) : null;
+    res.json(buildJsonResponse('md5', db, env, pred));
 });
 
-app.get('/', (req, res) => res.json({ status: "online", msg: "V61 API Running" }));
+app.get('/', (req, res) => res.redirect('/ui/b52'));
 
-app.listen(PORT, () => console.log(`🚀 V61 Server running at port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 V52 Server running on port ${PORT}`));
