@@ -1,6 +1,6 @@
 'use strict';
 // ============================================================
-// SICBO AI V60 ULTIMATE VIP - 50+ CẦU + ENV PROFILER + B52 FIX
+// SICBO AI V61 ULTIMATE - AUTO FALLBACK B52 + FULL CẦU
 // ============================================================
 const express = require('express');
 const axios = require('axios');
@@ -54,7 +54,7 @@ function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
 const label = c => c === 'T' ? 'TÀI' : (c === 'X' ? 'XỈU' : null);
 const flip  = c => c === 'T' ? 'X'   : (c === 'X' ? 'T'   : null);
 
-function dbPath(g) { return path.join(DB_DIR, `db_v60_${g}.json`); }
+function dbPath(g) { return path.join(DB_DIR, `db_v61_${g}.json`); }
 function readDB(g) {
     try {
         if (fs.existsSync(dbPath(g))) {
@@ -73,7 +73,6 @@ function getDice(it) { return [safeInt(it?.FirstDice), safeInt(it?.SecondDice), 
 function getSum(it) { const s = getDice(it).reduce((a, b) => a + b, 0); return (s >= 3 && s <= 18) ? s : safeInt(it?.DiceSum); }
 function getResult(it) { const s = getSum(it); return (s >= 3 && s <= 18) ? (s >= 11 ? 'T' : 'X') : null; }
 
-// B52 Helpers
 function getB52Dice(it) { return [safeInt(it?.d1), safeInt(it?.d2), safeInt(it?.d3)]; }
 function getB52Sum(it) { return getB52Dice(it).reduce((a, b) => a + b, 0); }
 function getB52Result(it) {
@@ -364,7 +363,7 @@ function runUnbiasedEnsemble(seq, db, env) {
 }
 
 // ============================================================
-// 6. FETCH & XỬ LÝ TỰ ĐỘNG (FIX LỖI B52 & API CHẾT)
+// 6. FETCH & XỬ LÝ (CƠ CHẾ FALLBACK B52)
 // ============================================================
 async function fetchApi(url) {
     try { 
@@ -403,7 +402,6 @@ async function processGame(game) {
             if (!list || !list.length) return;
             seq = list.map(getResult).filter(Boolean);
             
-            // Lưu rawHistory cho TX & MD5 để route có thể đọc
             const session = safeInt(list[list.length - 1].SessionId);
             if (db.lastSession === session) return;
             db.lastSession = session;
@@ -437,20 +435,21 @@ async function processGame(game) {
 setInterval(() => { processGame('md5'); processGame('taixiu'); processGame('b52'); }, TICK_MS);
 
 // ============================================================
-// 7. ROUTE API JSON (FIX LỖI STATUS ERROR)
+// 7. ROUTE API JSON (TỰ ĐỘNG FALLBACK)
 // ============================================================
-function buildJsonResponse(db, env, pred) {
+function buildJsonResponse(gameName, db, env, pred, note = "") {
     const duDoanText = pred ? label(pred.code) : null;
     const latestHist = db.history[db.history.length - 1] || {};
 
     return {
         status: "success",
         data: {
+            game: gameName,
             phienHienTai: latestHist.phien || "0",
             phienDuDoan: latestHist.phien ? latestHist.phien + 1 : "0",
             duDoan: duDoanText, 
             tiLe: pred ? pred.tiLe : "—",
-            liDo: pred ? `⭐ ${pred.label} → ${duDoanText} (${pred.tiLe})` : `⏳ Đang quét ${env.stats.L}/15 phiên...`,
+            liDo: pred ? `⭐ ${pred.label} → ${duDoanText} (${pred.tiLe}) ${note}` : `⏳ Đang quét ${env.stats.L}/15 phiên...`,
             xucXac: latestHist.xucXac || [],
             tongDiem: latestHist.tong || 0,
             moiTruong: { loai: env.type, efs: env.efs + '%' }
@@ -458,31 +457,30 @@ function buildJsonResponse(db, env, pred) {
     };
 }
 
-// Route B52
+// B52
 app.get('/b52', async (req, res) => {
     try {
         const db = readDB('b52');
         const seq = db.rawHistory.map(x => x.result);
         const env = db.envProfile || profileEnvironment(seq);
         const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, db, env) : null;
-        res.json(buildJsonResponse(db, env, pred));
+        res.json(buildJsonResponse("B52", db, env, pred));
     } catch (e) { res.status(500).json({ status: "error", message: e.message }); }
 });
 
-// Route TX (Gọi API trực tiếp, nếu lỗi thì đọc DB)
+// Taixiu & MD5: Nếu API chết, tự động lấy B52
 app.get('/taixiu', async (req, res) => {
     try {
         const db = readDB('taixiu');
         const list = await fetchApi(API_TX);
         
         if (!list || !list.length) {
-            if (db.rawHistory.length >= 15) {
-                const seq = db.rawHistory.map(x => x.result);
-                const env = profileEnvironment(seq);
-                const pred = runUnbiasedEnsemble(seq, db, env);
-                return res.json(buildJsonResponse(db, env, pred));
-            }
-            return res.json({ status: "error", message: "API Tài Xỉu đang bảo trì hoặc chặn IP!" });
+            // FALLBACK B52
+            const dbB52 = readDB('b52');
+            const seqB52 = dbB52.rawHistory.map(x => x.result);
+            const envB52 = dbB52.envProfile || profileEnvironment(seqB52);
+            const predB52 = seqB52.length >= 15 ? runUnbiasedEnsemble(seqB52, dbB52, envB52) : null;
+            return res.json(buildJsonResponse("TAIXIU (Fallback B52)", dbB52, envB52, predB52, "[API TX bị chặn, dùng B52 thay thế]"));
         }
         
         const seq = list.map(getResult).filter(Boolean);
@@ -491,24 +489,22 @@ app.get('/taixiu', async (req, res) => {
         
         const latest = list[list.length - 1];
         db.history = [{ phien: safeInt(latest.SessionId), xucXac: getDice(latest), tong: getSum(latest) }];
-        res.json(buildJsonResponse(db, env, pred));
+        res.json(buildJsonResponse("TAIXIU", db, env, pred));
     } catch (e) { res.status(500).json({ status: "error", message: e.message }); }
 });
 
-// Route MD5 (Gọi API trực tiếp, nếu lỗi thì đọc DB)
 app.get('/md5', async (req, res) => {
     try {
         const db = readDB('md5');
         const list = await fetchApi(API_MD5);
         
         if (!list || !list.length) {
-            if (db.rawHistory.length >= 15) {
-                const seq = db.rawHistory.map(x => x.result);
-                const env = profileEnvironment(seq);
-                const pred = runUnbiasedEnsemble(seq, db, env);
-                return res.json(buildJsonResponse(db, env, pred));
-            }
-            return res.json({ status: "error", message: "API MD5 đang bảo trì hoặc chặn IP!" });
+            // FALLBACK B52
+            const dbB52 = readDB('b52');
+            const seqB52 = dbB52.rawHistory.map(x => x.result);
+            const envB52 = dbB52.envProfile || profileEnvironment(seqB52);
+            const predB52 = seqB52.length >= 15 ? runUnbiasedEnsemble(seqB52, dbB52, envB52) : null;
+            return res.json(buildJsonResponse("MD5 (Fallback B52)", dbB52, envB52, predB52, "[API MD5 bị chặn, dùng B52 thay thế]"));
         }
         
         const seq = list.map(getResult).filter(Boolean);
@@ -517,10 +513,10 @@ app.get('/md5', async (req, res) => {
         
         const latest = list[list.length - 1];
         db.history = [{ phien: safeInt(latest.SessionId), xucXac: getDice(latest), tong: getSum(latest) }];
-        res.json(buildJsonResponse(db, env, pred));
+        res.json(buildJsonResponse("MD5", db, env, pred));
     } catch (e) { res.status(500).json({ status: "error", message: e.message }); }
 });
 
-app.get('/', (req, res) => res.json({ status: "online", msg: "V60 API Running" }));
+app.get('/', (req, res) => res.json({ status: "online", msg: "V61 API Running" }));
 
-app.listen(PORT, () => console.log(`🚀 V60 Server running at port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 V61 Server running at port ${PORT}`));
