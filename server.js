@@ -22,7 +22,7 @@ const DB_DIR = process.env.DB_DIR || __dirname;
 const TICK_MS = 5000;
 
 // ========================================================================
-// CONFIG & BASE WEIGHTS (TỪ USER)
+// CONFIG & BASE WEIGHTS
 // ========================================================================
 const CONFIG = {
     WARMUP: { MIN_SESSIONS: 15, FULL_SESSIONS: 60, EFS_TARGET: 80 },
@@ -67,7 +67,7 @@ function entropyBits(arr) {
 // ========================================================================
 // 1. DATABASE
 // ========================================================================
-function dbPath(g) { return path.join(DB_DIR, `db_v43_${g}.json`); }
+function dbPath(g) { return path.join(DB_DIR, `db_v45_${g}.json`); }
 function readDB(g) {
     const p = dbPath(g);
     try {
@@ -163,35 +163,10 @@ function profileEnvironment(seq) {
 }
 
 // ========================================================================
-// 3. TẠO ALL PATTERNS VÀ ÁNH XẠ VỀ 40 BASE WEIGHTS
+// 3. TẠO ALL PATTERNS
 // ========================================================================
-function mapToBaseWeight(algoId) {
-    const id = algoId.toLowerCase();
-    if (id.includes('streak') || id.includes('bet')) return 'cau_bet';
-    if (id.includes('bounce') || id.includes('dao_1_1')) return 'cau_dao_11';
-    if (id.includes('zigzag_2') || id.includes('22')) return 'cau_22';
-    if (id.includes('zigzag_3') || id.includes('33')) return 'cau_33';
-    if (id.includes('zigzag')) return 'cau_ziczac';
-    if (id.includes('markov')) return 'markov_chain';
-    if (id.includes('cycle')) return 'cau_chu_ky';
-    if (id.includes('ngram')) return 'distribution';
-    if (id.includes('gap')) return 'cau_gap';
-    if (id.includes('fractal')) return 'cau_tu_nhien';
-    if (id.includes('mtf')) return 'momentum';
-    if (id.includes('pull')) return 'resistance_support';
-    if (id.includes('sum')) return 'sum_trend';
-    if (id.includes('cusum')) return 'break_pattern';
-    if (id.includes('bayes')) return 'cau_tu_nhien';
-    if (id.includes('transmat')) return 'cau_chu_ky';
-    if (id.includes('mirror') || id.includes('palin')) return 'cau_doi';
-    if (id.includes('nhip_121') || id.includes('121')) return 'cau_121';
-    if (id.includes('nhip_212') || id.includes('212')) return 'cau_212';
-    return 'edge_cases'; // Fallback
-}
-
 function generateAllPatterns() {
     const A = [];
-    // 1. STREAK
     for (let minLen = 2; minLen <= 8; minLen++) {
         A.push({ id: `streak_learn_${minLen}`, baseFamily: 'cau_bet', fn: (seq, sums, db) => {
             const n = seq.length, last = seq[n - 1]; let len = 1;
@@ -205,7 +180,6 @@ function generateAllPatterns() {
             return null;
         }});
     }
-    // 2. ZIGZAG
     for (let win = 4; win <= 10; win++) {
         A.push({ id: `bounce_${win}`, baseFamily: 'cau_dao_11', fn: (seq) => {
             const n = seq.length; if (n < win + 1) return null;
@@ -221,7 +195,6 @@ function generateAllPatterns() {
             return { code: seq[n - p], name: `ZIGZAG-${p}`, conf: 0.72 };
         }});
     }
-    // 3. MARKOV
     for (let k = 2; k <= 10; k++) {
         A.push({ id: `markov_${k}`, baseFamily: 'markov_chain', fn: (seq) => {
             const n = seq.length; if (n < k + 6) return null;
@@ -233,7 +206,6 @@ function generateAllPatterns() {
             return { code: pT > pX ? 'T' : 'X', name: `MARKOV-${k}`, conf: Math.max(pT, pX) };
         }});
     }
-    // 4. NGRAM
     for (let len = 3; len <= 10; len++) {
         A.push({ id: `ngram_${len}`, baseFamily: 'distribution', fn: (seq) => {
             const n = seq.length; if (n < len + 5) return null;
@@ -247,7 +219,6 @@ function generateAllPatterns() {
             return { code: pT > pX ? 'T' : 'X', name: `NGRAM-${len}`, conf: Math.max(pT, pX) };
         }});
     }
-    // 5. CYCLE
     for (let p = 2; p <= 20; p++) {
         A.push({ id: `cycle_${p}`, baseFamily: 'cau_chu_ky', fn: (seq) => {
             const n = seq.length; if (n < p * 2 + 2) return null;
@@ -258,7 +229,6 @@ function generateAllPatterns() {
             return null;
         }});
     }
-    // 6. GAP & PULL
     for (let w = 20; w <= 60; w += 10) {
         A.push({ id: `pull_${w}`, baseFamily: 'resistance_support', fn: (seq) => {
             const n = seq.length; if (n < w) return null;
@@ -268,7 +238,6 @@ function generateAllPatterns() {
             return null;
         }});
     }
-    // 7. FRACTAL
     for (let sc = 3; sc <= 9; sc++) {
         A.push({ id: `fractal_${sc}`, baseFamily: 'cau_tu_nhien', fn: (seq) => {
             const n = seq.length; if (n < sc * 3) return null;
@@ -283,7 +252,6 @@ function generateAllPatterns() {
             return { code: pT > pX ? 'T' : 'X', name: `FRACTAL-${sc}`, conf: Math.max(pT, pX) };
         }});
     }
-    // 8. MIRROR
     for (let half = 3; half <= 8; half++) {
         A.push({ id: `mirror_${half}`, baseFamily: 'cau_doi', fn: (seq) => {
             const n = seq.length; if (n < half * 2 + 2) return null;
@@ -293,7 +261,6 @@ function generateAllPatterns() {
             return null;
         }});
     }
-    // 9. CUSUM & BAYES
     for (let w = 10; w <= 30; w += 10) {
         A.push({ id: `cusum_${w}`, baseFamily: 'break_pattern', fn: (seq) => {
             const n = seq.length; if (n < w) return null;
@@ -305,29 +272,41 @@ function generateAllPatterns() {
             return null;
         }});
     }
-
     return A;
 }
 
 const ALL_ALGOS = generateAllPatterns();
-console.log(`✅ Đã nạp ${ALL_ALGOS.length} thuật toán, map về ${Object.keys(DEFAULT_PATTERN_WEIGHTS).length} Base Weights.`);
+console.log(`✅ Đã nạp ${ALL_ALGOS.length} thuật toán.`);
 
 // ========================================================================
-// 4. TỔNG HỢP KHÔNG THIÊN VỊ (CÓ TÍNH BASE WEIGHTS)
+// 4. TỔNG HỢP KHÔNG THIÊN VỊ (FIX LỖI RA TÀI BỪA)
 // ========================================================================
 function runUnbiasedEnsemble(seq, sums, db, env) {
     const disabled = new Set(env.disabledPatterns);
     let votesT = [], votesX = [], details = [];
+
+    const last = seq[seq.length - 1];
+    let currentStreak = 1;
+    for (let i = seq.length - 2; i >= 0; i--) {
+        if (seq[i] === last) currentStreak++;
+        else break;
+    }
 
     for (const algo of ALL_ALGOS) {
         if (disabled.has(algo.baseFamily)) continue;
         let res = null; try { res = algo.fn(seq, sums, db); } catch (e) {}
         if (!res || !res.code) continue;
 
-        // Lấy Base Weight từ danh sách của User, nhân với trọng số học Online
         const baseW = DEFAULT_PATTERN_WEIGHTS[algo.baseFamily] || 1.0;
         const learnedW = db.weights?.[algo.id]?.w || 1.0;
-        const vote = res.conf * baseW * learnedW;
+        
+        let streakPenalty = 1.0;
+        if (currentStreak >= 3) {
+            if (res.code === last) streakPenalty = 0.5;
+            else streakPenalty = 1.5;
+        }
+
+        const vote = res.conf * baseW * learnedW * streakPenalty;
 
         if (res.code === 'T') votesT.push({ vote, name: res.name });
         else votesX.push({ vote, name: res.name });
@@ -338,28 +317,33 @@ function runUnbiasedEnsemble(seq, sums, db, env) {
     const sT = votesT.reduce((a, b) => a + b.vote, 0);
     const sX = votesX.reduce((a, b) => a + b.vote, 0);
 
-    // KHÔNG THIÊN VỊ: Chia trung bình mỗi bên
     const scoreT = cT > 0 ? sT / cT : 0;
     const scoreX = cX > 0 ? sX / cX : 0;
 
     let winner, confidence, patternName, method;
 
     if (cT + cX === 0) {
-        winner = 'T'; confidence = 0.51; patternName = 'TRUNG-LẬP'; method = 'neutral';
-    } else if (Math.abs(scoreT - scoreX) < 0.02) {
-        winner = env.dominant || (scoreT >= scoreX ? 'T' : 'X');
-        confidence = 0.515; patternName = 'HÒA-NHIỄU'; method = 'tie';
+        winner = flip(last); confidence = 0.51; patternName = 'BẺ-CẦU-NHIỄU'; method = 'anti_noise';
+    } else if (Math.abs(scoreT - scoreX) < 0.03) {
+        winner = flip(last); confidence = 0.515; patternName = 'HÒA-BẺ-CẦU'; method = 'tie_break';
     } else {
         winner = scoreT > scoreX ? 'T' : 'X';
         const maxS = Math.max(scoreT, scoreX);
         const diff = Math.abs(scoreT - scoreX) / maxS;
-        confidence = clamp(0.5 + diff * 0.5, 0.5, 0.85);
-        const top = (winner === 'T' ? votesT : votesX).sort((a,b)=>b.vote-a.vote)[0];
-        patternName = top ? top.name : 'META';
-        method = 'score';
+        
+        if (diff < 0.05) {
+            winner = flip(last);
+            confidence = 0.52;
+            patternName = 'BẺ-CẦU-DO-NHIỄU';
+            method = 'low_diff_break';
+        } else {
+            confidence = clamp(0.5 + diff * 0.5, 0.5, 0.85);
+            const top = (winner === 'T' ? votesT : votesX).sort((a,b)=>b.vote-a.vote)[0];
+            patternName = top ? top.name : 'META';
+            method = 'score';
+        }
     }
 
-    // Áp dụng EFS
     const efs = env.efs;
     if (env.stats.L < CONFIG.WARMUP.MIN_SESSIONS) {
         confidence = clamp(0.51 + (confidence - 0.5) * 0.5, 0.51, 0.55);
@@ -401,17 +385,18 @@ async function processGame(game) {
     if (db.lastSession === session) return;
 
     const seq = list.map(getResult).filter(Boolean);
-    if (seq.length < 5) return;
+    if (seq.length < 15) {
+        db.lastSession = session;
+        saveDB(game, db);
+        return;
+    }
 
     updateStreakStats(seq, db);
     const env = profileEnvironment(seq);
     db.envProfile = env;
 
-    let pred = null;
-    if (seq.length >= 15) {
-        const sums = list.map(getSum).filter(s => s >= 3 && s <= 18);
-        pred = runUnbiasedEnsemble(seq, sums, db, env);
-    }
+    const sums = list.map(getSum).filter(s => s >= 3 && s <= 18);
+    const pred = runUnbiasedEnsemble(seq, sums, db, env);
 
     const prev = db.history[db.history.length - 1];
     if (prev && safeInt(prev.phienDuDoan) === session && prev.DU_DOAN_CODE) {
@@ -428,13 +413,13 @@ async function processGame(game) {
         phien: session, xucXac: getDice(latest), tong: getSum(latest),
         ketQua: getResult(latest), ketQuaLabel: label(getResult(latest)),
         phienDuDoan: session + 1,
-        DU_DOAN_CODE: pred ? pred.code : null,
-        DU_DOAN: pred ? label(pred.code) : '—',
-        TI_LE: pred ? pred.tiLe : '—',
-        patternName: pred ? pred.label : 'CHỜ_DATA',
-        algoDetails: pred ? pred.details : [],
-        method: pred ? pred.method : 'none',
-        phase: pred ? pred.phase : 'WARMUP',
+        DU_DOAN_CODE: pred.code, 
+        DU_DOAN: label(pred.code), // Lưu TÀI/XỈU
+        TI_LE: pred.tiLe,
+        patternName: pred.label,
+        algoDetails: pred.details,
+        method: pred.method,
+        phase: pred.phase,
         envType: env.type,
         trangThai: 'ĐANG CHỜ'
     });
@@ -447,21 +432,23 @@ async function processGame(game) {
 setInterval(() => { processGame('md5'); processGame('taixiu'); }, TICK_MS);
 
 // ========================================================================
-// 6. ROUTE JSON (/taixiu, /md5)
+// 6. ROUTE JSON (FIX LỖI TRẢ RA TÀI/XỈU)
 // ========================================================================
 function buildJsonResponse(game, list, db, env, pred) {
     const settled = db.history.filter(h => h.trangThai === 'ĐÚNG' || h.trangThai === 'SAI');
     const win = settled.filter(h => h.trangThai === 'ĐÚNG').length;
     const lose = settled.filter(h => h.trangThai === 'SAI').length;
 
+    const duDoanText = pred ? label(pred.code) : null;
+
     return {
         status: "success",
         data: {
             phienHienTai: String(safeInt(list[list.length-1].SessionId)),
             phienDuDoan: String(safeInt(list[list.length-1].SessionId) + 1),
-            duDoan: pred ? pred.code : null,
+            duDoan: duDoanText, // FIX: Trả ra TÀI hoặc XỈU
             tiLe: pred ? pred.tiLe : "—",
-            liDo: pred ? `⭐ ${pred.label} → ${label(pred.code)} (${pred.tiLe})` : `⏳ Đang quét ${env.stats.L}/15 phiên để nhận diện...`,
+            liDo: pred ? `⭐ ${pred.label} → ${duDoanText} (${pred.tiLe})` : `⏳ Đang quét ${env.stats.L}/15 phiên...`,
             xucXac: getDice(list[list.length-1]),
             tongDiem: getSum(list[list.length-1]),
             moiTruong: {
@@ -517,7 +504,7 @@ app.get('/ui/:game', (req, res) => {
     res.send(`<!DOCTYPE html>
 <html lang="vi"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>V43 - ${game.toUpperCase()}</title>
+<title>V45 - ${game.toUpperCase()}</title>
 <style>
 *{box-sizing:border-box}
 body{font-family:-apple-system,sans-serif;background:#0a0e27;color:#e6eef6;padding:12px;margin:0;}
@@ -546,7 +533,7 @@ td{padding:8px 3px;text-align:center;border-bottom:1px solid #1e293b;}
 <script>setTimeout(()=>location.reload(), 5000);</script>
 </head><body>
 <div class="header">
-  <h1>V43 · ${game.toUpperCase()}</h1>
+  <h1>V45 · ${game.toUpperCase()}</h1>
   <div class="env-box">
     <div class="env-row"><span>🌍 Môi trường</span><span class="env-val">${env.type}</span></div>
     <div class="env-row"><span>🎯 Độ tin cậy</span><span class="env-val">${(env.confidence*100).toFixed(1)}%</span></div>
@@ -583,4 +570,4 @@ ${rows.map(it => {
 
 app.get('/', (req, res) => res.redirect('/ui/md5'));
 
-app.listen(PORT, () => console.log(`🚀 V43 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 V45 Server running on port ${PORT}`));
