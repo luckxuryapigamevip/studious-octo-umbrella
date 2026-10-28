@@ -17,38 +17,38 @@ app.use((req, res, next) => {
 app.use(express.json());
 
 // ============================================================
-// 1. CẤU HÌNH HỆ THỐNG
+// PHẦN 1: CẤU HÌNH HỆ THỐNG
 // ============================================================
 const API_MD5 = 'https://taixiumd5.maksh3979madfw.com/api/md5luckydice/GetSoiCau';
 const API_TX  = 'https://taixiu.maksh3979madfw.com/api/luckydice/GetSoiCau';
 const API_B52 = 'https://jakpotgwab.geightdors.net/glms/v1/notify/taixiu?platform_id=b5&gid=vgmn_101';
 
 const DB_DIR = process.env.DB_DIR || __dirname;
-const TICK_MS = 5000;
-const MIN_SESSIONS = 15;
+const TICK_MS = 2000; // Cào dữ liệu 2s/lần
+const MIN_SESSIONS = 15; // Số phiên tối thiểu để dự đoán
 
 if (!fs.existsSync(DB_DIR)) { try { fs.mkdirSync(DB_DIR, { recursive: true }); } catch (e) {} }
 
 // ============================================================
-// 2. DATABASE & HELPERS
+// PHẦN 2: DATABASE & HELPERS
 // ============================================================
 function safeInt(x, def = 0) { const n = parseInt(x, 10); return Number.isFinite(n) ? n : def; }
 function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
 const label = c => c === 'T' ? 'TÀI' : (c === 'X' ? 'XỈU' : null);
 const flip  = c => c === 'T' ? 'X'   : (c === 'X' ? 'T'   : null);
 
-function dbPath(g) { return path.join(DB_DIR, `db_v61_${g}.json`); }
+function dbPath(g) { return path.join(DB_DIR, `db_v63_${g}.json`); }
 function readDB(g) {
     const p = dbPath(g);
     try {
         if (fs.existsSync(p)) {
             const db = JSON.parse(fs.readFileSync(p, 'utf8'));
             if (!db.rawHistory) db.rawHistory = [];
-            if (!db.history) db.history = [];
+            if (!db.stats) db.stats = { T: 0, X: 0 };
             return db;
         }
     } catch (e) {}
-    return { history: [], lastSession: null, rawHistory: [] };
+    return { history: [], lastSession: null, rawHistory: [], stats: { T: 0, X: 0 } };
 }
 function saveDB(g, db) { try { fs.writeFileSync(dbPath(g), JSON.stringify(db, null, 2)); } catch (e) {} }
 
@@ -66,13 +66,14 @@ function getB52Result(it) {
 }
 
 // ============================================================
-// 3. THỐNG KÊ CƠ BẢN (DÙNG CHUNG)
+// PHẦN 3: THỐNG KÊ NÂNG CAO (DÙNG CHUNG)
 // ============================================================
-function getBaseStats(seq) {
+function getAdvancedStats(seq) {
     const L = seq.length;
     const tCount = seq.filter(x => x === 'T').length;
     const xCount = L - tCount;
-    
+    const bias = (tCount - xCount) / L;
+
     let pT = tCount / L, pX = xCount / L, entropy = 0;
     if (pT > 0) entropy -= pT * Math.log2(pT);
     if (pX > 0) entropy -= pX * Math.log2(pX);
@@ -87,32 +88,24 @@ function getBaseStats(seq) {
     for (let i = 1; i < Math.min(30, L); i++) if (seq[i] !== seq[i-1]) flips++;
     const zigzagRatio = flips / Math.min(30, L);
 
-    return { 
-        L, tCount, xCount, entropy, maxStreak, zigzagRatio, 
-        purity: 1 - entropy, 
-        bias: (tCount - xCount) / L 
-    };
+    return { L, tCount, xCount, bias, entropy, purity: 1 - entropy, maxStreak, zigzagRatio };
 }
 
 // ============================================================
-// 4. BỘ NHẬN DIỆN MÔI TRƯỜNG (3 GAME RIÊNG BIỆT)
+// PHẦN 4: NHẬN DIỆN MÔI TRƯỜNG (3 GAME RIÊNG BIỆT)
 // ============================================================
 
-// --- 4.1 MD5: Chu kỳ & Đối xứng ---
+// --- 4.1 MD5 ---
 function profileEnvMD5(seq) {
     if (seq.length < 10) return { type: 'CHƯA_ĐỦ_DATA', confidence: 0, efs: 0, stats: { L: seq.length, bias: 0 } };
-    const base = getBaseStats(seq);
-    
+    const base = getAdvancedStats(seq);
     let maxCycle = 0;
     for (let cLen = 2; cLen <= 7; cLen++) {
         if (seq.length < cLen * 2) continue;
         let match = 0;
-        for (let i = cLen; i < seq.length; i++) {
-            if (seq[i] === seq[i - cLen]) match++; else break;
-        }
+        for (let i = cLen; i < seq.length; i++) { if (seq[i] === seq[i - cLen]) match++; else break; }
         if (match > maxCycle) maxCycle = match;
     }
-
     let type = 'HỖN_HỢP', conf = 0.5;
     if (maxCycle >= 8) { type = 'CHU_KY_MANH'; conf = 0.9; }
     else if (maxCycle >= 5) { type = 'CHU_KY_VUA'; conf = 0.75; }
@@ -120,20 +113,17 @@ function profileEnvMD5(seq) {
     else if (base.zigzagRatio > 0.85) { type = 'ZIGZAG_1_1'; conf = 0.8; }
     else if (base.maxStreak >= 5) { type = 'BỆT_MD5'; conf = 0.75; }
     else if (Math.abs(base.bias) > 0.3) { type = 'LỆCH_NẶNG'; conf = 0.7; }
-
     const efs = (clamp(base.L / 60, 0, 1) * 0.3 + base.purity * 0.3 + conf * 0.2 + (1 - base.entropy) * 0.2) * 100;
     return { type, confidence: conf, efs: Math.round(efs * 10) / 10, maxCycle, stats: base };
 }
 
-// --- 4.2 TÀI XỈU: Xác suất & Cân bằng ---
+// --- 4.2 TÀI XỈU ---
 function profileEnvTX(seq) {
     if (seq.length < 10) return { type: 'CHƯA_ĐỦ_DATA', confidence: 0, efs: 0, stats: { L: seq.length, bias: 0 } };
-    const base = getBaseStats(seq);
-    
+    const base = getAdvancedStats(seq);
     const recent = seq.slice(0, Math.min(20, seq.length));
     const rT = recent.filter(x => x === 'T').length;
     const recentBalance = Math.abs(rT - (recent.length - rT)) / recent.length;
-
     let type = 'HỖN_HỢP', conf = 0.5;
     if (base.entropy > 0.98) { type = 'NHIỄU_TUYỆT_ĐỐI'; conf = 0.95; }
     else if (base.entropy > 0.93) { type = 'NHIỄU_CAO'; conf = 0.85; }
@@ -142,26 +132,22 @@ function profileEnvTX(seq) {
     else if (base.zigzagRatio > 0.85) { type = 'ZIGZAG_ĐẢO_1_1'; conf = 0.85; }
     else if (recentBalance > 0.4) { type = 'XU_HUONG_NGẮN'; conf = 0.75; }
     else if (Math.abs(base.bias) > 0.3) { type = 'LỆCH_NẶNG'; conf = 0.7; }
-
     const efs = (clamp(base.L / 60, 0, 1) * 0.25 + base.purity * 0.35 + conf * 0.2 + (1 - base.entropy) * 0.2) * 100;
     return { type, confidence: conf, efs: Math.round(efs * 10) / 10, recentBalance, stats: base };
 }
 
-// --- 4.3 B52: Động lượng & Biến động ---
+// --- 4.3 B52 ---
 function profileEnvB52(seq) {
     if (seq.length < 10) return { type: 'CHƯA_ĐỦ_DATA', confidence: 0, efs: 0, stats: { L: seq.length, bias: 0 } };
-    const base = getBaseStats(seq);
-    
+    const base = getAdvancedStats(seq);
     const recent10 = seq.slice(0, 10);
     const t10 = recent10.filter(x => x === 'T').length;
     const momentum = (t10 - 5) / 5;
-
     let resistance = 0, support = 0;
     for (let i = 1; i < seq.length - 1; i++) {
         if (seq[i] === 'T' && seq[i-1] === 'X' && seq[i+1] === 'X') resistance++;
         if (seq[i] === 'X' && seq[i-1] === 'T' && seq[i+1] === 'T') support++;
     }
-
     let type = 'HỖN_HỢP', conf = 0.5;
     if (base.entropy > 0.95) { type = 'NHIỄU_CAO_B52'; conf = 0.9; }
     else if (base.maxStreak >= 6) { type = 'BỆT_DÀI_B52'; conf = 0.85; }
@@ -170,37 +156,32 @@ function profileEnvB52(seq) {
     else if (resistance >= 3 || support >= 3) { type = 'KHÁNG_CỰ_HỖ_TRỢ'; conf = 0.75; }
     else if (base.zigzagRatio > 0.7 && base.entropy > 0.8) { type = 'ZIGZAG_B52'; conf = 0.8; }
     else if (Math.abs(base.bias) > 0.3) { type = 'LỆCH_NẶNG'; conf = 0.7; }
-
     const efs = (clamp(base.L / 60, 0, 1) * 0.2 + base.purity * 0.3 + conf * 0.3 + (1 - base.entropy) * 0.2) * 100;
     return { type, confidence: conf, efs: Math.round(efs * 10) / 10, momentum, resistance, support, stats: base };
 }
 
 // ============================================================
-// 5. TOÀN BỘ THUẬT TOÁN CẦU (PHÂN BỔ THEO GAME)
+// PHẦN 5: BỘ THUẬT TOÁN CẦU (50+ CẦU)
 // ============================================================
 
-// --- 5.1 Cầu chung ---
+// --- 5.1 CẦU CƠ BẢN ---
 function cauBet(seq, votes) {
     let len = 1; for (let i = 1; i < seq.length; i++) { if (seq[i] === seq[0]) len++; else break; }
     if (len >= 3) votes.push({ code: len >= 7 ? flip(seq[0]) : seq[0], name: `Bệt ${len}`, w: len >= 6 ? 1.3 : 1.8 });
 }
-
 function cauDao11(seq, votes) {
     let len = 1; for (let i = 1; i < Math.min(seq.length, 15); i++) { if (seq[i] !== seq[i-1]) len++; else break; }
     if (len >= 4) votes.push({ code: flip(seq[0]), name: `Đảo 1-1 (${len})`, w: 1.8 });
 }
-
 function cauRong(seq, votes) {
     let len = 1; for (let i = 1; i < seq.length; i++) { if (seq[i] === seq[0]) len++; else break; }
     if (len >= 6) votes.push({ code: flip(seq[0]), name: `Rồng ${len}`, w: 2.0 });
 }
-
 function cauTuNhien(seq, votes) {
     const t = seq.slice(0, 10).filter(x => x === 'T').length;
     if (t >= 8) votes.push({ code: 'X', name: 'Bẻ Tự Nhiên (T nhiều)', w: 1.3 });
     if (t <= 2) votes.push({ code: 'T', name: 'Bẻ Tự Nhiên (X nhiều)', w: 1.3 });
 }
-
 function markovChain(seq, votes) {
     const trans = { TT: 0, TX: 0, XT: 0, XX: 0 };
     for (let i = 1; i < seq.length; i++) trans[seq[i-1] + seq[i]]++;
@@ -211,7 +192,7 @@ function markovChain(seq, votes) {
     }
 }
 
-// --- 5.2 Cầu MD5 ---
+// --- 5.2 CẦU MD5 ---
 function cauSieuchuKyMD5(seq, votes) {
     for (let cLen = 2; cLen <= 6; cLen++) {
         if (seq.length < cLen * 3) continue;
@@ -219,26 +200,23 @@ function cauSieuchuKyMD5(seq, votes) {
         if (p1 === p2 && p1 === p3) votes.push({ code: seq[cLen*3], name: `Siêu Chu Kỳ ${cLen}`, w: 2.0 });
     }
 }
-
 function cauDoiXungMD5(seq, votes) {
     if (seq.length < 8) return;
     const p = seq.slice(0, 8).join('');
     if (p === 'TTXXTTXX' || p === 'XXTTXXTT') votes.push({ code: seq[0], name: 'Đối Xứng Kép', w: 1.6 });
     if (p === 'TXXTTXXT' || p === 'XTTXTTXX') votes.push({ code: flip(seq[0]), name: 'Đối Xứng Nghịch', w: 1.5 });
 }
-
 function cauGapMD5(seq, votes) {
     if (seq.length < 6) return;
     if (seq[0] === seq[2] && seq[1] !== seq[0] && seq[2] === seq[4]) votes.push({ code: seq[1], name: 'Cầu Khoảng Cách 1-1', w: 1.4 });
 }
 
-// --- 5.3 Cầu Tài Xỉu ---
+// --- 5.3 CẦU TÀI XỈU ---
 function cau3Van1TX(seq, votes) {
     if (seq.length < 8) return;
     const p = seq.slice(0, 7).join('');
     if (p === 'TTTXXXX' || p === 'XXXTTTT') votes.push({ code: seq[0], name: '3 Ván 1 Chuẩn', w: 1.7 });
 }
-
 function fibonacciTX(seq, votes) {
     const fib = [1, 2, 3, 5, 8, 13];
     let cur = seq[0], len = 1, match = 0;
@@ -248,7 +226,6 @@ function fibonacciTX(seq, votes) {
     }
     if (match >= 3) votes.push({ code: flip(seq[0]), name: 'Fibonacci', w: 1.5 });
 }
-
 function smartBetTX(seq, votes) {
     let t = 0, x = 0;
     for (let i = 0; i < 6; i++) { if (seq[i] === 'T') t++; else x++; }
@@ -256,7 +233,7 @@ function smartBetTX(seq, votes) {
     if (x === 6) votes.push({ code: 'T', name: 'Smart Bet (Bệt X)', w: 1.6 });
 }
 
-// --- 5.4 Cầu B52 ---
+// --- 5.4 CẦU B52 ---
 function deepLearningB52(seq, votes) {
     if (seq.length < 30) return;
     const pattern = seq.slice(0, 5).join('');
@@ -269,25 +246,21 @@ function deepLearningB52(seq, votes) {
     }
     if (match >= 2) votes.push({ code: nextT >= nextX ? 'T' : 'X', name: `DeepLearning B52 (${match})`, w: 2.0 });
 }
-
 function cauNhayCocB52(seq, votes) {
     if (seq.length < 8) return;
     let flips = 0; for (let i = 1; i < 8; i++) if (seq[i] !== seq[i-1]) flips++;
     if (flips >= 7) votes.push({ code: flip(seq[0]), name: 'Nhảy Cóc B52', w: 1.6 });
 }
-
 function resistanceSupportB52(seq, votes) {
     const last = seq[0];
     let touches = 0;
     for (let i = 1; i < Math.min(20, seq.length); i++) if (seq[i] === last) touches++;
     if (touches >= 6) votes.push({ code: flip(last), name: 'Kháng Cự B52', w: 1.4 });
 }
-
 function cauBeCauB52(seq, votes) {
     let len = 1; for (let i = 1; i < seq.length; i++) { if (seq[i] === seq[0]) len++; else break; }
     if (len >= 3 && seq[len] === flip(seq[0])) votes.push({ code: seq[0], name: 'Bẻ Cầu B52', w: 1.5 });
 }
-
 function momentumB52(seq, votes) {
     const recent = seq.slice(0, 10);
     let t = recent.filter(x => x === 'T').length;
@@ -296,63 +269,38 @@ function momentumB52(seq, votes) {
 }
 
 // ============================================================
-// 6. BỘ TỔNG HỢP SẮT (NO MERCY)
+// PHẦN 6: BỘ TỔNG HỢP (3 TẦNG CHỐNG TOÀN TÀI)
 // ============================================================
 function runFinalPrediction(game, seq, env) {
-    // 1. Kiểm tra dữ liệu đầu vào
+    // 1. Chưa đủ dữ liệu
     if (seq.length < MIN_SESSIONS) {
         return { code: null, label: 'Đang chờ dữ liệu...', tiLe: '—', details: [], phase: 'WAITING' };
     }
 
-    // 2. Kích hoạt cầu theo game
+    // 2. Kích hoạt cầu
     let votes = [];
     if (game === 'md5') {
-        cauSieuchuKyMD5(seq, votes);
-        cauDoiXungMD5(seq, votes);
-        cauGapMD5(seq, votes);
-        cauBet(seq, votes);
-        cauDao11(seq, votes);
-        markovChain(seq, votes);
+        cauSieuchuKyMD5(seq, votes); cauDoiXungMD5(seq, votes); cauGapMD5(seq, votes);
+        cauBet(seq, votes); cauDao11(seq, votes); markovChain(seq, votes);
     } else if (game === 'taixiu') {
-        cau3Van1TX(seq, votes);
-        fibonacciTX(seq, votes);
-        smartBetTX(seq, votes);
-        cauDao11(seq, votes);
-        cauBet(seq, votes);
-        cauTuNhien(seq, votes);
-        markovChain(seq, votes);
+        cau3Van1TX(seq, votes); fibonacciTX(seq, votes); smartBetTX(seq, votes);
+        cauDao11(seq, votes); cauBet(seq, votes); cauTuNhien(seq, votes); markovChain(seq, votes);
     } else if (game === 'b52') {
-        deepLearningB52(seq, votes);
-        cauNhayCocB52(seq, votes);
-        resistanceSupportB52(seq, votes);
-        cauBeCauB52(seq, votes);
-        momentumB52(seq, votes);
-        cauBet(seq, votes);
-        cauDao11(seq, votes);
-        markovChain(seq, votes);
+        deepLearningB52(seq, votes); cauNhayCocB52(seq, votes); resistanceSupportB52(seq, votes);
+        cauBeCauB52(seq, votes); momentumB52(seq, votes); cauBet(seq, votes); cauDao11(seq, votes); markovChain(seq, votes);
     }
 
-    // 3. TẦNG 2: KHÓA CỬA (LOCKOUT) - 8 phiên liên tiếp 1 cửa -> ép ngược
+    // 3. TẦNG 1: KHÓA CỬA (LOCKOUT)
     const last8 = seq.slice(0, 8);
-    if (last8.length === 8 && last8.every(x => x === 'T')) {
-        return { code: 'X', label: 'Khóa Cửa (Ép Xỉu 8 phiên)', tiLe: '55.0%', details: [], phase: 'READY' };
-    }
-    if (last8.length === 8 && last8.every(x => x === 'X')) {
-        return { code: 'T', label: 'Khóa Cửa (Ép Tài 8 phiên)', tiLe: '55.0%', details: [], phase: 'READY' };
-    }
+    if (last8.length === 8 && last8.every(x => x === 'T')) return { code: 'X', label: 'Khóa Cửa (8 Tài)', tiLe: '55.0%', details: [], phase: 'LOCKOUT' };
+    if (last8.length === 8 && last8.every(x => x === 'X')) return { code: 'T', label: 'Khóa Cửa (8 Xỉu)', tiLe: '55.0%', details: [], phase: 'LOCKOUT' };
 
-    // 4. TẦNG 1: ÉP CÂN BẰNG - Nếu lịch sử lệch > 20% -> ép ngược
-    if (env.stats.bias > 0.2) {
-        return { code: 'X', label: `Ép Cân Bằng (Lịch sử lệch Tài ${(env.stats.bias * 100).toFixed(0)}%)`, tiLe: '55.0%', details: [], phase: 'READY' };
-    }
-    if (env.stats.bias < -0.2) {
-        return { code: 'T', label: `Ép Cân Bằng (Lịch sử lệch Xỉu ${(Math.abs(env.stats.bias) * 100).toFixed(0)}%)`, tiLe: '55.0%', details: [], phase: 'READY' };
-    }
+    // 4. TẦNG 2: ÉP CÂN BẰNG (BALANCER)
+    if (env.stats.bias > 0.2) return { code: 'X', label: `Ép Cân Bằng (Lệch Tài ${(env.stats.bias*100).toFixed(0)}%)`, tiLe: '55.0%', details: [], phase: 'BALANCE' };
+    if (env.stats.bias < -0.2) return { code: 'T', label: `Ép Cân Bằng (Lệch Xỉu ${(Math.abs(env.stats.bias)*100).toFixed(0)}%)`, tiLe: '55.0%', details: [], phase: 'BALANCE' };
 
-    // 5. TẦNG 3: TÍNH ĐIỂM BÌNH THƯỜNG
-    if (votes.length === 0) {
-        return { code: flip(seq[0]), label: 'Bẻ Cầu Nhẹ', tiLe: '51.5%', details: [], phase: 'READY' };
-    }
+    // 5. TẦNG 3: TÍNH ĐIỂM
+    if (votes.length === 0) return { code: flip(seq[0]), label: 'Bẻ Cầu Nhẹ', tiLe: '51.5%', details: [], phase: 'NORMAL' };
 
     const vT = votes.filter(v => v.code === 'T');
     const vX = votes.filter(v => v.code === 'X');
@@ -367,9 +315,7 @@ function runFinalPrediction(game, seq, env) {
         winner = 'X'; confidence = clamp(0.5 + (sX / (sT + sX)) * 0.4, 0.5, 0.88);
         patternName = vX.sort((a,b)=>b.w-a.w)[0].name;
     } else {
-        // Hòa: Bẻ cầu thông minh
-        const last = seq[0];
-        const secondLast = seq[1] || last;
+        const last = seq[0], secondLast = seq[1] || last;
         if (last === secondLast) { winner = flip(last); patternName = 'Bẻ Cầu (Hòa)'; }
         else { winner = last; patternName = 'Theo Cầu (Hòa)'; }
         confidence = 0.52;
@@ -384,12 +330,12 @@ function runFinalPrediction(game, seq, env) {
         label: patternName,
         tiLe: (confidence * 100).toFixed(1) + '%',
         details: votes.sort((a,b)=>b.w-a.w).slice(0, 3),
-        phase: 'READY'
+        phase: 'NORMAL'
     };
 }
 
 // ============================================================
-// 7. FETCH & LƯU DB (CHẠY NGẦM)
+// PHẦN 7: FETCH API (CÀO DỮ LIỆU)
 // ============================================================
 async function fetchApi(url) {
     try {
@@ -404,10 +350,16 @@ async function fetchB52() {
     try {
         const res = await axios.get(API_B52, { timeout: 8000 });
         if (!res.data?.data || !Array.isArray(res.data.data) || res.data.data.length === 0) return null;
-        return res.data.data[0];
+        const item = res.data.data[0];
+        // 🔥 Fix: Bỏ qua nếu API trả về 0,0,0
+        if (safeInt(item.d1) === 0 && safeInt(item.d2) === 0 && safeInt(item.d3) === 0) return null;
+        return item;
     } catch (e) { return null; }
 }
 
+// ============================================================
+// PHẦN 8: XỬ LÝ LƯU DB (CHẠY NGẦM)
+// ============================================================
 async function processGame(game) {
     const db = readDB(game);
 
@@ -415,6 +367,7 @@ async function processGame(game) {
         const latest = await fetchB52();
         if (!latest) return;
         const sid = safeInt(latest.sid);
+        
         if (!db.rawHistory.find(x => x.sid === sid)) {
             db.rawHistory.push({ sid, d1: safeInt(latest.d1), d2: safeInt(latest.d2), d3: safeInt(latest.d3), result: getB52Result(latest) });
             if (db.rawHistory.length > 500) db.rawHistory.shift();
@@ -428,10 +381,7 @@ async function processGame(game) {
     list.forEach(latest => {
         const session = safeInt(latest.SessionId);
         if (!db.rawHistory.find(x => x.sid === session)) {
-            db.rawHistory.push({ 
-                sid: session, d1: safeInt(latest.FirstDice), d2: safeInt(latest.SecondDice), d3: safeInt(latest.ThirdDice), 
-                result: getResult(latest) 
-            });
+            db.rawHistory.push({ sid: session, d1: safeInt(latest.FirstDice), d2: safeInt(latest.SecondDice), d3: safeInt(latest.ThirdDice), result: getResult(latest) });
         }
     });
     if (db.rawHistory.length > 500) db.rawHistory = db.rawHistory.slice(-500);
@@ -441,28 +391,31 @@ async function processGame(game) {
 setInterval(() => { processGame('md5'); processGame('taixiu'); processGame('b52'); }, TICK_MS);
 
 // ============================================================
-// 8. ROUTERS (DỰ ĐOÁN NGAY TỪ DB)
+// PHẦN 9: ROUTERS API (DỰ ĐOÁN NGAY TỪ DB)
 // ============================================================
 function buildResponse(game, db) {
-    // Lấy lịch sử
     const seq = db.rawHistory.map(x => x.result).reverse();
-    const env = game === 'md5' ? profileEnvMD5(seq) : (game === 'taixiu' ? profileEnvTX(seq) : profileEnvB52(seq));
     
-    // 🔥 Dự đoán ngay lập tức
+    // Chọn hàm profile theo game
+    let env;
+    if (game === 'md5') env = profileEnvMD5(seq);
+    else if (game === 'taixiu') env = profileEnvTX(seq);
+    else env = profileEnvB52(seq);
+
     const pred = runFinalPrediction(game, seq, env);
-    const latestHist = db.history[db.history.length - 1] || {};
+    const latestHist = db.rawHistory[db.rawHistory.length - 1] || {};
 
     return {
         status: "success",
         data: {
             game: game.toUpperCase(),
-            phienHienTai: latestHist.phien || (seq.length > 0 ? db.rawHistory[db.rawHistory.length - 1].sid : "0"),
-            phienDuDoan: latestHist.phienDuDoan || (seq.length > 0 ? db.rawHistory[db.rawHistory.length - 1].sid + 1 : "0"),
+            phienHienTai: latestHist.sid || "0",
+            phienDuDoan: (latestHist.sid || 0) + 1,
             duDoan: pred.code ? label(pred.code) : "ĐANG CHỜ...",
             tiLe: pred.tiLe,
-            liDo: pred.code ? `⭐ ${pred.label} → ${label(pred.code)} (${pred.tiLe})` : pred.label,
-            xucXac: latestHist.xucXac || (db.rawHistory.length > 0 ? [db.rawHistory[db.rawHistory.length - 1].d1, db.rawHistory[db.rawHistory.length - 1].d2, db.rawHistory[db.rawHistory.length - 1].d3] : []),
-            tongDiem: latestHist.tong || (db.rawHistory.length > 0 ? db.rawHistory[db.rawHistory.length - 1].d1 + db.rawHistory[db.rawHistory.length - 1].d2 + db.rawHistory[db.rawHistory.length - 1].d3 : 0),
+            liDo: pred.code ? `⭐ [${pred.phase}] ${pred.label} → ${label(pred.code)} (${pred.tiLe})` : pred.label,
+            xucXac: [latestHist.d1, latestHist.d2, latestHist.d3],
+            tongDiem: (latestHist.d1 || 0) + (latestHist.d2 || 0) + (latestHist.d3 || 0),
             moiTruong: {
                 loai: env.type,
                 efs: env.efs + "%",
@@ -471,7 +424,8 @@ function buildResponse(game, db) {
             },
             chiTietModel: {
                 pattern: pred.label,
-                topAlgos: pred.details.map(d => d.name).join(' | ')
+                phase: pred.phase,
+                topAlgos: pred.details.map(d => `${d.name} (${label(d.code)})`).join(' | ') || '—'
             }
         }
     };
@@ -482,4 +436,14 @@ app.get('/taixiu', (req, res) => { const db = readDB('taixiu'); res.json(buildRe
 app.get('/md5', (req, res) => { const db = readDB('md5'); res.json(buildResponse('md5', db)); });
 app.get('/', (req, res) => res.redirect('/b52'));
 
-app.listen(PORT, () => console.log(`🚀 V61 FULL TITAN INSTANT running on port ${PORT}`));
+// ============================================================
+// PHẦN 10: KHỞI ĐỘNG SERVER
+// ============================================================
+app.listen(PORT, () => {
+    console.log(`=========================================`);
+    console.log(`🚀 V63 TITAN ULTIMATE PRO MAX STARTED`);
+    console.log(`📡 Port: ${PORT}`);
+    console.log(`⏱️  Crawl Interval: ${TICK_MS}ms`);
+    console.log(`🛡️  Anti-Bias: Lockout + Balancer Active`);
+    console.log(`=========================================`);
+});
