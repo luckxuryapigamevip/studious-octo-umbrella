@@ -31,19 +31,14 @@ const CONFIG = {
     ENV: { MIN_SAMPLES: 10 }
 };
 
-// Trọng số mặc định cho TẤT CẢ các loại cầu
 const DEFAULT_PATTERN_WEIGHTS = {
-    // Nhóm cầu cơ bản
     'cau_bet': 1.0, 'cau_dao_11': 1.0, 'cau_rong': 1.0, 'cau_tu_nhien': 1.0,
-    // Nhóm cầu đối xứng & chu kỳ
     'cau_22': 1.0, 'cau_33': 1.0, 'cau_44': 1.0, 'cau_55': 1.0,
     'cau_121': 1.0, 'cau_212': 1.0, 'cau_123': 1.0, 'cau_321': 1.0,
     'cau_1221': 1.0, 'cau_2112': 1.0, 'cau_chu_ky': 1.0,
-    // Nhóm cầu phức tạp
     'cau_nhay_coc': 1.0, 'cau_nhip_nghieng': 1.0, 'cau_3van1': 1.0,
     'cau_be_cau': 1.0, 'cau_gap': 1.0, 'cau_ziczac': 1.0,
     'cau_doi': 1.0, 'cau_rong_bat_tan': 1.0, 'cau_bet_gay': 1.0,
-    // Nhóm thuật toán & thống kê
     'markov_chain': 1.2, 'moving_avg_drift': 1.1, 'sum_pressure': 1.1,
     'volatility': 1.0, 'distribution': 1.0, 'dice_pattern': 1.0,
     'sum_trend': 1.0, 'edge_cases': 1.0, 'momentum': 1.0,
@@ -119,7 +114,6 @@ function profileEnvironment(seq) {
         return { type: 'CHƯA_ĐỦ_DATA', confidence: 0, efs: 0, purity: 0, entropy: 1, dominant: null, availablePatterns: [], disabledPatterns: [], stats: { L: L } };
     }
 
-    // 1. Phân tích phân phối & Entropy
     const tCount = seq.filter(x => x === 'T').length;
     const xCount = L - tCount;
     const balance = Math.abs(tCount - xCount) / L;
@@ -128,7 +122,6 @@ function profileEnvironment(seq) {
     if (pT > 0) entropy -= pT * Math.log2(pT);
     if (pX > 0) entropy -= pX * Math.log2(pX);
 
-    // 2. Phân tích Chuỗi (Streak)
     let streaks = [], cur = seq[0], len = 1;
     for (let i = 1; i < L; i++) {
         if (seq[i] === cur) len++;
@@ -138,13 +131,11 @@ function profileEnvironment(seq) {
     const maxStreak = Math.max(...streaks.map(s => s.len));
     const streakRatio = streaks.filter(s => s.len >= 3).length / streaks.length;
 
-    // 3. Phân tích Zigzag (Đảo nhịp)
     const rec20 = seq.slice(-Math.min(30, L));
     let flips20 = 0;
     for (let i = 1; i < rec20.length; i++) if (rec20[i] !== rec20[i-1]) flips20++;
     const zigzagRatio = rec20.length > 1 ? flips20 / (rec20.length - 1) : 0;
 
-    // 4. Phân tích Chu kỳ (Pattern Repeating)
     let maxCycle = 0;
     for (let cycleLen = 2; cycleLen <= 6; cycleLen++) {
         let match = 0;
@@ -154,7 +145,6 @@ function profileEnvironment(seq) {
         if (match > maxCycle) maxCycle = match;
     }
 
-    // 5. Đánh giá Trạng thái Môi trường
     let type = 'HỖN_HỢP', confidence = 0.5;
     const purity = 1 - entropy;
 
@@ -172,7 +162,6 @@ function profileEnvironment(seq) {
         type = 'BỆT_NHẸ'; confidence = 0.6; 
     }
 
-    // 6. Thiết lập Available/Disabled Patterns
     const allPatterns = Object.keys(DEFAULT_PATTERN_WEIGHTS);
     let available = [...allPatterns], disabled = [];
 
@@ -189,7 +178,6 @@ function profileEnvironment(seq) {
         available = ['cau_chu_ky', 'cau_22', 'cau_33', 'cau_121', 'cau_123', 'cau_1221'];
     }
 
-    // 7. Tính EFS (Environment Favorability Score)
     const dataVolume = clamp(L / CONFIG.WARMUP.FULL_SESSIONS, 0, 1);
     const efs = (dataVolume * 0.35 + purity * 0.30 + confidence * 0.20 + (1 - entropy) * 0.15) * 100;
 
@@ -207,7 +195,6 @@ function profileEnvironment(seq) {
 // ============================================================
 function getW(db, id) { return db.weights?.[id]?.w || 1.0; }
 
-// 4.1 Nhóm Cầu Cơ Bản
 function cauBet(results, db) {
     if (results.length < 3) return null;
     let streakType = results[0], len = 1;
@@ -238,7 +225,6 @@ function cauTuNhien(results, db) {
     return { prediction: t > l10.length/2 ? 'T' : 'X', confidence: 5 * getW(db, 'cau_tu_nhien'), name: 'Tự Nhiên', code: 'cau_tu_nhien' };
 }
 
-// 4.2 Nhóm Cầu Đối Xứng & Chu Kỳ
 function cau22(results, db) {
     if (results.length < 5) return null;
     const p = results.slice(0, 4).join('');
@@ -274,7 +260,6 @@ function cauChuKy(results, db) {
     return null;
 }
 
-// 4.3 Nhóm Cầu Phức Tạp
 function cauNhayCoc(results, db) {
     if (results.length < 5) return null;
     let flips = 0;
@@ -300,7 +285,6 @@ function cauBeCau(results, db) {
     return null;
 }
 
-// 4.4 Nhóm Thuật Toán & Thống Kê
 function markovChain(results, db) {
     if (results.length < 5) return null;
     const transitions = { TT: 0, TX: 0, XT: 0, XX: 0 };
@@ -379,11 +363,10 @@ function smartBet(results, db) {
 // 5. TỔNG HỢP ENSEMBLE (TRỌNG SỐ ĐỘNG)
 // ============================================================
 function runUnbiasedEnsemble(seq, sums, db, env) {
-    const disabled = new Set(env.disabledPatterns);
+    const disabled = new Set(env.disabledPatterns || []);
     let votesT = [], votesX = [], details = [];
-    const last = seq[0]; // Mảng seq được truyền vào đã đảo ngược (mới nhất ở đầu)
+    const last = seq[0]; // Mảng seq mới nhất ở đầu
 
-    // Đăng ký tất cả các hàm cầu
     const funcs = [
         cauBet, cauDao11, cauRong, cau22, cau33, cau121, cauChuKy,
         cauNhayCoc, cau3Van1, cauBeCau, markovChain, movingAvgDrift,
@@ -395,7 +378,6 @@ function runUnbiasedEnsemble(seq, sums, db, env) {
         try { res = fn(seq, db); } catch (e) {}
         if (!res || disabled.has(res.code)) continue;
         
-        // Lấy trọng số động từ DB (nếu có), nếu không dùng mặc định
         const dynW = db.patternPerformance?.[res.code]?.w || 1.0;
         const baseW = DEFAULT_PATTERN_WEIGHTS[res.code] || 1.0;
         const finalW = dynW * baseW;
@@ -406,7 +388,6 @@ function runUnbiasedEnsemble(seq, sums, db, env) {
         details.push({ algo: res.code, code: res.prediction, name: res.name, vote });
     }
 
-    // Fallback nếu không có cầu nào hoạt động
     if (votesT.length === 0 && votesX.length === 0) {
         const fb = cauTuNhien(seq, db);
         if (fb.prediction === 'T') votesT.push({ vote: 0.05, name: fb.name, code: fb.code });
@@ -435,7 +416,6 @@ function runUnbiasedEnsemble(seq, sums, db, env) {
         }
     }
 
-    // Áp dụng Warm-up / EFS
     if (env.stats.L < CONFIG.WARMUP.MIN_SESSIONS) confidence = clamp(0.51 + (confidence - 0.5) * 0.5, 0.51, 0.55);
     else if (env.efs < CONFIG.WARMUP.EFS_TARGET) confidence = clamp(Math.min(confidence, 0.51 + (env.efs / 80) * 0.08), 0.51, 0.59);
     else confidence = clamp(confidence * (1 + ((env.efs - 80) / 20) * 0.1), 0.51, 0.88);
@@ -476,7 +456,6 @@ async function processGame(game) {
         latest = latestB52;
         const sid = safeInt(latest.sid);
         
-        // 1. Cập nhật DB nếu có phiên mới
         if (!db.rawHistory.find(x => x.sid === sid)) {
             db.rawHistory.push({
                 sid: sid,
@@ -487,36 +466,29 @@ async function processGame(game) {
             saveDB(game, db);
         }
 
-        // 2. Chuẩn bị dữ liệu cho dự đoán (Đảo ngược để mới nhất ở đầu)
+        // FIX CỰC QUAN TRỌNG: Lấy toàn bộ dữ liệu từ DB (đảo ngược để mới nhất ở đầu)
         currentSeq = db.rawHistory.map(x => x.result).reverse();
         currentSums = db.rawHistory.map(x => x.d1 + x.d2 + x.d3).reverse();
 
-        // 3. Chấm điểm phiên trước
         const prev = db.history[db.history.length - 1];
         if (prev && prev.DU_DOAN_CODE && prev.trangThai === 'ĐANG CHỜ' && prev.phien < sid) {
             const actual = getB52Result(latest);
             prev.trangThai = prev.DU_DOAN_CODE === actual ? 'ĐÚNG' : 'SAI';
-            
-            // Cập nhật hiệu suất động cho các cầu đã vote
+            // Update learning logic...
             if (prev.algoDetails) {
                 for (const algo of prev.algoDetails) {
                     if (!db.patternPerformance[algo.algo]) db.patternPerformance[algo.algo] = { win: 0, lose: 0, w: 1.0 };
                     if (algo.code === actual) db.patternPerformance[algo.algo].win++;
                     else db.patternPerformance[algo.algo].lose++;
-                    
                     const pp = db.patternPerformance[algo.algo];
                     const total = pp.win + pp.lose;
-                    if (total >= 10) {
-                        const winrate = pp.win / total;
-                        // Trọng số dao động từ 0.5 đến 1.5 dựa trên winrate
-                        pp.w = clamp(0.5 + (winrate - 0.5) * 2, 0.5, 1.5);
-                    }
+                    if (total >= 10) pp.w = clamp(0.5 + ((pp.win / total) - 0.5) * 2, 0.5, 1.5);
                 }
             }
             saveDB(game, db);
         }
 
-        // 4. Dự đoán nếu đủ dữ liệu
+        // Chạy dự đoán nếu có >= 15 phiên
         if (currentSeq.length >= 15) {
             updateStreakStats(currentSeq, db);
             const env = profileEnvironment(currentSeq);
@@ -524,15 +496,12 @@ async function processGame(game) {
             const pred = runUnbiasedEnsemble(currentSeq, currentSums, db, env);
 
             const lastHistory = db.history[db.history.length - 1];
+            // Chỉ push nếu chưa có dự đoán cho phiên sid này
             if (!lastHistory || lastHistory.phien < sid) {
                 db.history.push({
-                    phien: sid,
-                    xucXac: getB52Dice(latest),
-                    tong: getB52Sum(latest),
-                    ketQua: getB52Result(latest),
-                    ketQuaLabel: label(getB52Result(latest)),
-                    phienDuDoan: sid + 1,
-                    DU_DOAN_CODE: pred.code, DU_DOAN: label(pred.code),
+                    phien: sid, xucXac: getB52Dice(latest), tong: getB52Sum(latest),
+                    ketQua: getB52Result(latest), ketQuaLabel: label(getB52Result(latest)),
+                    phienDuDoan: sid + 1, DU_DOAN_CODE: pred.code, DU_DOAN: label(pred.code),
                     TI_LE: pred.tiLe, patternName: pred.label, algoDetails: pred.details,
                     phase: pred.phase, envType: env.type, trangThai: 'ĐANG CHỜ'
                 });
@@ -543,11 +512,11 @@ async function processGame(game) {
         return;
     }
 
-    // Xử lý MD5 & TAIXIU
+    // MD5 & TAIXIU
     const list = await fetchApi(game === 'md5' ? API_MD5 : API_TX);
     if (!list || !list.length) return;
     latest = list[list.length - 1];
-    currentSeq = list.map(getResult).filter(Boolean).reverse(); // Đảo ngược
+    currentSeq = list.map(getResult).filter(Boolean).reverse(); 
     currentSums = list.map(getSum).filter(s => s >= 3 && s <= 18).reverse();
     
     const session = safeInt(latest.SessionId);
@@ -559,38 +528,27 @@ async function processGame(game) {
     updateStreakStats(currentSeq, db);
     const env = profileEnvironment(currentSeq);
     db.envProfile = env;
-
     const pred = runUnbiasedEnsemble(currentSeq, currentSums, db, env);
 
     const prev = db.history[db.history.length - 1];
     if (prev && prev.DU_DOAN_CODE && prev.trangThai === 'ĐANG CHỜ' && prev.phien < session) {
         const actual = getResult(latest);
         prev.trangThai = prev.DU_DOAN_CODE === actual ? 'ĐÚNG' : 'SAI';
-        
         if (prev.algoDetails) {
             for (const algo of prev.algoDetails) {
                 if (!db.patternPerformance[algo.algo]) db.patternPerformance[algo.algo] = { win: 0, lose: 0, w: 1.0 };
                 if (algo.code === actual) db.patternPerformance[algo.algo].win++;
                 else db.patternPerformance[algo.algo].lose++;
-                
                 const pp = db.patternPerformance[algo.algo];
-                const total = pp.win + pp.lose;
-                if (total >= 10) {
-                    const winrate = pp.win / total;
-                    pp.w = clamp(0.5 + (winrate - 0.5) * 2, 0.5, 1.5);
-                }
+                if (pp.win + pp.lose >= 10) pp.w = clamp(0.5 + ((pp.win / (pp.win + pp.lose)) - 0.5) * 2, 0.5, 1.5);
             }
         }
     }
 
     db.history.push({
-        phien: session,
-        xucXac: getDice(latest),
-        tong: getSum(latest),
-        ketQua: getResult(latest),
-        ketQuaLabel: label(getResult(latest)),
-        phienDuDoan: session + 1,
-        DU_DOAN_CODE: pred.code, DU_DOAN: label(pred.code),
+        phien: session, xucXac: getDice(latest), tong: getSum(latest),
+        ketQua: getResult(latest), ketQuaLabel: label(getResult(latest)),
+        phienDuDoan: session + 1, DU_DOAN_CODE: pred.code, DU_DOAN: label(pred.code),
         TI_LE: pred.tiLe, patternName: pred.label, algoDetails: pred.details,
         phase: pred.phase, envType: env.type, trangThai: 'ĐANG CHỜ'
     });
@@ -606,7 +564,7 @@ setInterval(() => {
 }, TICK_MS);
 
 // ============================================================
-// 7. ROUTERS & API
+// 7. ROUTERS & API (FIX LỖI HIỂN THỊ NULL)
 // ============================================================
 function buildJsonResponse(game, db, env, pred) {
     const settled = db.history.filter(h => h.trangThai === 'ĐÚNG' || h.trangThai === 'SAI');
@@ -622,11 +580,12 @@ function buildJsonResponse(game, db, env, pred) {
             phienDuDoan: latestHist.phienDuDoan || "0",
             duDoan: duDoanText, 
             tiLe: pred ? pred.tiLe : "—",
-            liDo: pred ? `⭐ ${pred.label} → ${duDoanText} (${pred.tiLe})` : `⏳ Đang quét ${env.stats?.L || 0}/15 phiên...`,
+            // Sửa lại câu thông báo cho chuẩn xác
+            liDo: pred ? `⭐ ${pred.label} → ${duDoanText} (${pred.tiLe})` : `⏳ Hệ thống đang đồng bộ dữ liệu...`,
             xucXac: latestHist.xucXac || [],
             tongDiem: latestHist.tong || 0,
             moiTruong: {
-                loai: env.type,
+                loai: env.type || "ĐANG TẢI",
                 doTinCay: (env.confidence || 0).toFixed(2),
                 efs: (env.efs || 0) + "%",
                 doTinhKhiet: ((env.purity || 0)*100).toFixed(1) + "%",
@@ -644,6 +603,7 @@ function buildJsonResponse(game, db, env, pred) {
 
 app.get('/b52', async (req, res) => {
     const db = readDB('b52');
+    // FIX: Lấy dữ liệu chuẩn từ DB
     const seq = db.rawHistory.map(x => x.result).reverse();
     const env = db.envProfile || profileEnvironment(seq);
     const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, [], db, env) : null;
@@ -654,7 +614,7 @@ app.get('/taixiu', async (req, res) => {
     const db = readDB('taixiu');
     const env = db.envProfile || { type: 'CHƯA CÓ', confidence: 0, efs: 0, purity: 0, entropy: 1, dominant: null, stats: {L:0} };
     const seq = (db.rawHistory || []).map(x => x.result).reverse();
-    const pred = db.history.length >= 15 ? runUnbiasedEnsemble(seq, [], db, env) : null;
+    const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, [], db, env) : null;
     res.json(buildJsonResponse('taixiu', db, env, pred));
 });
 
@@ -662,10 +622,10 @@ app.get('/md5', async (req, res) => {
     const db = readDB('md5');
     const env = db.envProfile || { type: 'CHƯA CÓ', confidence: 0, efs: 0, purity: 0, entropy: 1, dominant: null, stats: {L:0} };
     const seq = (db.rawHistory || []).map(x => x.result).reverse();
-    const pred = db.history.length >= 15 ? runUnbiasedEnsemble(seq, [], db, env) : null;
+    const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, [], db, env) : null;
     res.json(buildJsonResponse('md5', db, env, pred));
 });
 
 app.get('/', (req, res) => res.redirect('/ui/b52'));
 
-app.listen(PORT, () => console.log(`🚀 V52 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
