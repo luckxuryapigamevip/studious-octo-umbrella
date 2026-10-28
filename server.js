@@ -22,11 +22,7 @@ const DB_DIR = process.env.DB_DIR || __dirname;
 const TICK_MS = 5000;
 
 const CONFIG = {
-    WARMUP: {
-        MIN_SESSIONS: 15,       // Dưới 15 phiên: Không dự đoán (chỉ nhận diện)
-        FULL_SESSIONS: 60,      // Trên 60 phiên: Data đầy đủ
-        EFS_TARGET: 80          // Ngưỡng EFS để chuyển sang READY
-    },
+    WARMUP: { MIN_SESSIONS: 15, FULL_SESSIONS: 60, EFS_TARGET: 80 },
     ENV: { MIN_SAMPLES: 10 }
 };
 
@@ -55,13 +51,18 @@ function entropyBits(arr) {
 // ========================================================================
 // 1. DATABASE
 // ========================================================================
-function dbPath(g) { return path.join(DB_DIR, `db_v41_${g}.json`); }
+function dbPath(g) { return path.join(DB_DIR, `db_v42_${g}.json`); }
 function readDB(g) {
     const p = dbPath(g);
     try {
-        if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
+        if (fs.existsSync(p)) {
+            const db = JSON.parse(fs.readFileSync(p, 'utf8'));
+            if (!db.weights) db.weights = {};
+            if (!db.streakStats) db.streakStats = { T: {}, X: {} };
+            return db;
+        }
     } catch (e) {}
-    return { history: [], lastSession: null, weights: {}, envProfile: null };
+    return { history: [], lastSession: null, weights: {}, streakStats: { T: {}, X: {} }, envProfile: null };
 }
 function saveDB(g, db) {
     try { fs.writeFileSync(dbPath(g), JSON.stringify(db, null, 2)); } catch (e) {}
@@ -76,8 +77,25 @@ function getResult(it) {
     return (s >= 3 && s <= 18) ? (s >= 11 ? 'T' : 'X') : null;
 }
 
+function updateStreakStats(seq, db) {
+    if (!db.streakStats) db.streakStats = { T: {}, X: {} };
+    let cur = seq[0], len = 1;
+    for (let i = 1; i < seq.length; i++) {
+        if (seq[i] === cur) len++;
+        else {
+            if (!db.streakStats[cur][len]) db.streakStats[cur][len] = { cont: 0, stop: 0 };
+            db.streakStats[cur][len].stop++;
+            for (let l = 1; l < len; l++) {
+                if (!db.streakStats[cur][l]) db.streakStats[cur][l] = { cont: 0, stop: 0 };
+                db.streakStats[cur][l].cont++;
+            }
+            cur = seq[i]; len = 1;
+        }
+    }
+}
+
 // ========================================================================
-// 2. NHẬN DIỆN MÔI TRƯỜNG (FIX LỖI TIN CẬY 100%)
+// 2. NHẬN DIỆN MÔI TRƯỜNG (FIX LỖI)
 // ========================================================================
 function profileEnvironment(seq) {
     const L = seq.length;
@@ -88,9 +106,8 @@ function profileEnvironment(seq) {
     const tCount = seq.filter(x => x === 'T').length;
     const xCount = L - tCount;
     const balance = Math.abs(tCount - xCount) / L;
-    const entropy = entropyBits(seq); // 0 -> 1
+    const entropy = entropyBits(seq);
 
-    // Phân tích Streak
     let streaks = [], cur = seq[0], len = 1;
     for (let i = 1; i < L; i++) {
         if (seq[i] === cur) len++;
@@ -100,19 +117,17 @@ function profileEnvironment(seq) {
     const maxStreak = Math.max(...streaks);
     const streakRatio = streaks.filter(s => s >= 3).length / streaks.length;
 
-    // Phân tích Zigzag (20 phiên)
     const rec20 = seq.slice(-Math.min(20, L));
     let flips20 = 0;
     for (let i = 1; i < rec20.length; i++) if (rec20[i] !== rec20[i-1]) flips20++;
     const zigzagRatio = rec20.length > 1 ? flips20 / (rec20.length - 1) : 0;
 
-    // Phân loại
     let type = 'HỖN_HỢP', confidence = 0.5;
     const purity = 1 - entropy;
 
     if (entropy > 0.90) {
         type = 'NHIỄU'; 
-        confidence = clamp((entropy - 0.90) * 10, 0, 1); // Sửa lỗi: độ tin cậy thấp khi nhiễu
+        confidence = clamp((entropy - 0.90) * 10, 0, 1);
     } else if (entropy < 0.50 && (streakRatio > 0.3 || maxStreak >= 4)) {
         type = 'BỆT'; 
         confidence = clamp((0.5 - entropy) * 2, 0.5, 1);
@@ -123,100 +138,292 @@ function profileEnvironment(seq) {
 
     const dominant = balance > 0.15 ? (tCount > xCount ? 'T' : 'X') : null;
 
-    // EFS
     const dataVolume = clamp(L / CONFIG.WARMUP.FULL_SESSIONS, 0, 1);
     const efs = (dataVolume * 0.35 + purity * 0.30 + confidence * 0.20 + (1 - entropy) * 0.15) * 100;
 
-    // Available Patterns
     const available = [], disabled = [];
     if (type === 'NHIỄU') {
         disabled.push('streak', 'zigzag', 'mirror', 'cycle');
-        available.push('markov', 'ngram', 'pull', 'gap');
+        available.push('markov', 'ngram', 'pull', 'gap', 'transmat');
     } else if (type === 'BỆT') {
         available.push('streak', 'pull');
         disabled.push('zigzag');
     } else if (type === 'ZIGZAG') {
-        available.push('zigzag', 'mirror');
+        available.push('zigzag', 'mirror', 'bayes');
         disabled.push('streak');
     } else {
-        available.push('markov', 'ngram', 'pull', 'streak', 'zigzag');
+        available.push('markov', 'ngram', 'pull', 'streak', 'zigzag', 'bayes', 'cusum', 'fractal', 'transmat');
     }
 
     return { type, confidence, efs: Math.round(efs*10)/10, purity, entropy, dominant, availablePatterns: available, disabledPatterns: disabled, stats: { L, tCount, xCount, maxStreak, zigzagRatio } };
 }
 
 // ========================================================================
-// 3. DANH SÁCH CẦU (Rút gọn để load nhanh, đủ xài)
+// 3. FULL ALGORITHMS & PATTERNS (200+ CẦU)
 // ========================================================================
 function generateAllPatterns() {
     const A = [];
-    // Bệt
-    for (let l = 3; l <= 6; l++) A.push({ id: `streak_${l}`, family: 'streak', base: 1.5, fn: (seq) => {
-        const n = seq.length, last = seq[n-1]; let c = 1;
-        for (let i = n-2; i >= 0; i--) { if (seq[i] === last) c++; else break; }
-        return c >= l ? { code: last, name: `BỆT-${c}`, conf: 0.7 } : null;
-    }});
-    
-    // Zigzag
-    for (let w = 4; w <= 8; w++) A.push({ id: `zigzag_${w}`, family: 'zigzag', base: 1.4, fn: (seq) => {
-        const n = seq.length; if (n < w + 1) return null;
-        let f = 0; for (let i = n-w; i < n; i++) if (seq[i] !== seq[i-1]) f++;
-        return f === w ? { code: flip(seq[n-1]), name: `ĐẢO-${w}`, conf: 0.75 } : null;
-    }});
 
-    // Ngram
-    for (let len = 3; len <= 7; len++) A.push({ id: `ngram_${len}`, family: 'ngram', base: 1.4, fn: (seq) => {
-        const n = seq.length; if (n < len + 5) return null;
-        const tail = seq.slice(-len).join(''); let t = 0, x = 0, occ = 0;
-        for (let i = 0; i + len < n; i++) {
-            if (seq.slice(i, i+len).join('') === tail) { occ++; if (seq[i+len] === 'T') t++; else x++; }
+    // 1. STREAK (Bệt)
+    for (let minLen = 2; minLen <= 8; minLen++) {
+        A.push({ id: `streak_learn_${minLen}`, family: 'streak', base: 1.5, fn: (seq, sums, db) => {
+            const n = seq.length, last = seq[n - 1]; let len = 1;
+            for (let i = n - 2; i >= 0; i--) { if (seq[i] === last) len++; else break; }
+            if (len < minLen) return null;
+            const st = db.streakStats?.[last]?.[len];
+            if (!st || (st.cont + st.stop) < 2) return null;
+            const pCont = (st.cont + 1) / (st.cont + st.stop + 2);
+            if (pCont > 0.55) return { code: last, name: `BỆT-${len}-TIẾP`, conf: clamp(pCont, 0.6, 0.85) };
+            if (pCont < 0.45) return { code: flip(last), name: `BỆT-${len}-GÃY`, conf: clamp(1 - pCont, 0.6, 0.85) };
+            return null;
+        }});
+    }
+    for (let minLen = 3; minLen <= 8; minLen++) {
+        A.push({ id: `streak_pure_${minLen}`, family: 'streak', base: 1.2, fn: (seq) => {
+            const n = seq.length, last = seq[n - 1]; let len = 1;
+            for (let i = n - 2; i >= 0; i--) { if (seq[i] === last) len++; else break; }
+            return len >= minLen ? { code: last, name: `BỆT-THUẦN-${len}`, conf: 0.65 } : null;
+        }});
+    }
+
+    // 2. ZIGZAG (Đảo 1-1)
+    for (let win = 4; win <= 10; win++) {
+        A.push({ id: `bounce_${win}`, family: 'zigzag', base: 1.4, fn: (seq) => {
+            const n = seq.length; if (n < win + 1) return null;
+            let flips = 0;
+            for (let i = n - win; i < n; i++) if (seq[i] !== seq[i - 1]) flips++;
+            return flips === win ? { code: flip(seq[n - 1]), name: `ĐẢO-1-1-W${win}`, conf: 0.75 } : null;
+        }});
+    }
+    for (let p = 2; p <= 8; p++) {
+        A.push({ id: `zigzag_${p}`, family: 'zigzag', base: 1.3, fn: (seq) => {
+            const n = seq.length; if (n < p * 2 + 2) return null;
+            for (let i = n - p * 2; i < n - p; i++) if (seq[i] !== seq[i + p]) return null;
+            return { code: seq[n - p], name: `ZIGZAG-${p}`, conf: 0.72 };
+        }});
+    }
+
+    // 3. MIRROR & PALINDROME
+    for (let half = 3; half <= 8; half++) {
+        A.push({ id: `mirror_${half}`, family: 'mirror', base: 1.3, fn: (seq) => {
+            const n = seq.length; if (n < half * 2 + 2) return null;
+            const rec = seq.slice(-(half * 2));
+            if (rec.slice(0, half).map(flip).join('') === rec.slice(half).join(''))
+                return { code: flip(seq[n - 1]), name: `GƯƠNG-${half}`, conf: 0.7 };
+            return null;
+        }});
+    }
+    for (const n of [5, 7]) {
+        A.push({ id: `palin_${n}`, family: 'mirror', base: 1.2, fn: (seq) => {
+            const L = seq.length; if (L < n + 1) return null;
+            const w = seq.slice(-n);
+            if (w.join('') === w.slice().reverse().join(''))
+                return { code: seq[L - n - 1], name: `PALIN-${n}`, conf: 0.74 };
+            return null;
+        }});
+    }
+
+    // 4. N-GRAM & N-GRAM SKIP
+    for (let len = 3; len <= 10; len++) {
+        A.push({ id: `ngram_${len}`, family: 'ngram', base: 1.4, fn: (seq) => {
+            const n = seq.length; if (n < len + 5) return null;
+            const tail = seq.slice(-len).join(''); let t = 0, x = 0, occ = 0;
+            for (let i = 0; i + len < n; i++) {
+                if (seq.slice(i, i + len).join('') === tail) { occ++; if (seq[i + len] === 'T') t++; else x++; }
+            }
+            if (occ < 2) return null;
+            const pT = (t + 1) / (occ + 2), pX = (x + 1) / (occ + 2);
+            if (Math.max(pT, pX) < 0.65) return null;
+            return { code: pT > pX ? 'T' : 'X', name: `NGRAM-${len}`, conf: Math.max(pT, pX) };
+        }});
+    }
+    for (let len = 3; len <= 6; len++) {
+        A.push({ id: `ngram_skip_${len}`, family: 'ngram', base: 1.2, fn: (seq) => {
+            const n = seq.length; if (n < len * 2 + 5) return null;
+            const tail = []; for (let k = 0; k < len; k++) tail.push(seq[n - 1 - 2 * k]);
+            const tailStr = tail.join('');
+            let t = 0, x = 0, occ = 0;
+            for (let i = 0; i + 2 * len < n; i++) {
+                const block = []; for (let k = 0; k < len; k++) block.push(seq[i + 2 * k]);
+                if (block.join('') === tailStr) { occ++; if (seq[i + 2 * len] === 'T') t++; else x++; }
+            }
+            if (occ < 2) return null;
+            const pT = (t + 1) / (occ + 2), pX = (x + 1) / (occ + 2);
+            if (Math.max(pT, pX) < 0.65) return null;
+            return { code: pT > pX ? 'T' : 'X', name: `NGRAM-SKIP-${len}`, conf: Math.max(pT, pX) };
+        }});
+    }
+
+    // 5. MARKOV
+    for (let k = 2; k <= 10; k++) {
+        A.push({ id: `markov_${k}`, family: 'markov', base: 1.5, fn: (seq) => {
+            const n = seq.length; if (n < k + 6) return null;
+            const key = seq.slice(-k).join(''); let t = 0, x = 0;
+            for (let i = k; i < n; i++) if (seq.slice(i - k, i).join('') === key) { if (seq[i] === 'T') t++; else x++; }
+            const tot = t + x; if (tot < 3) return null;
+            const pT = (t + 1) / (tot + 2), pX = (x + 1) / (tot + 2);
+            if (Math.max(pT, pX) < 0.6) return null;
+            return { code: pT > pX ? 'T' : 'X', name: `MARKOV-${k}`, conf: Math.max(pT, pX) };
+        }});
+    }
+
+    // 6. CYCLE
+    for (let p = 2; p <= 20; p++) {
+        A.push({ id: `cycle_${p}`, family: 'cycle', base: 1.2, fn: (seq) => {
+            const n = seq.length; if (n < p * 2 + 2) return null;
+            let m = 0, tot = 0;
+            for (let i = p; i < n; i++) { tot++; if (seq[i] === seq[i - p]) m++; }
+            const r = m / tot;
+            if (r >= 0.7) return { code: seq[n - p], name: `CHU-KỲ-${p}`, conf: clamp(r, 0.7, 0.9) };
+            return null;
+        }});
+    }
+
+    // 7. GAP
+    for (let th = 0.5; th <= 1.5; th += 0.15) {
+        A.push({ id: `gap_${th.toFixed(2)}`, family: 'gap', base: 1.1, fn: (seq) => {
+            const n = seq.length; if (n < 20) return null;
+            const tP = [], xP = [];
+            for (let i = 0; i < n; i++) seq[i] === 'T' ? tP.push(i) : xP.push(i);
+            if (tP.length < 3 || xP.length < 3) return null;
+            const tG = tP[tP.length - 1] - tP[tP.length - 2];
+            const xG = xP[xP.length - 1] - xP[xP.length - 2];
+            const tP2 = (n - tP[tP.length - 1]) / Math.max(tG, 1);
+            const xP2 = (n - xP[xP.length - 1]) / Math.max(xG, 1);
+            const diff = tP2 - xP2;
+            if (Math.abs(diff) < th) return null;
+            if (diff > th) return { code: 'T', name: `GAP-T-${th.toFixed(1)}`, conf: clamp(0.55 + diff * 0.05, 0.55, 0.8) };
+            return { code: 'X', name: `GAP-X-${th.toFixed(1)}`, conf: clamp(0.55 + Math.abs(diff) * 0.05, 0.55, 0.8) };
+        }});
+    }
+
+    // 8. FRACTAL
+    for (let sc = 3; sc <= 9; sc++) {
+        A.push({ id: `fractal_${sc}`, family: 'fractal', base: 1.3, fn: (seq) => {
+            const n = seq.length; if (n < sc * 3) return null;
+            const last = seq.slice(-sc).join('');
+            let t = 0, x = 0, cnt = 0;
+            for (let i = 0; i + sc < n - sc; i++) {
+                if (seq.slice(i, i + sc).join('') === last) { if (seq[i + sc] === 'T') t++; else x++; cnt++; }
+            }
+            if (cnt < 2) return null;
+            const pT = (t + 0.5) / (cnt + 1), pX = (x + 0.5) / (cnt + 1);
+            if (Math.max(pT, pX) < 0.65) return null;
+            return { code: pT > pX ? 'T' : 'X', name: `FRACTAL-${sc}`, conf: Math.max(pT, pX) };
+        }});
+    }
+
+    // 9. MOMENTUM (MTF)
+    for (let w = 5; w <= 25; w += 3) {
+        A.push({ id: `mtf_${w}`, family: 'mtf', base: 1.1, fn: (seq) => {
+            const n = seq.length; if (n < w) return null;
+            const pT = seq.slice(-w).filter(x => x === 'T').length / w;
+            if (pT >= 0.7) return { code: 'X', name: `MTF-REV-X-${w}`, conf: 0.62 };
+            if (pT <= 0.3) return { code: 'T', name: `MTF-REV-T-${w}`, conf: 0.62 };
+            if (pT >= 0.6) return { code: 'T', name: `MTF-FOLLOW-T-${w}`, conf: 0.58 };
+            if (pT <= 0.4) return { code: 'X', name: `MTF-FOLLOW-X-${w}`, conf: 0.58 };
+            return null;
+        }});
+    }
+
+    // 10. PULL (Kéo cân bằng)
+    for (let w = 20; w <= 60; w += 5) {
+        A.push({ id: `pull_${w}`, family: 'pull', base: 1.0, fn: (seq) => {
+            const n = seq.length; if (n < w) return null;
+            const rec = seq.slice(-w), pT = rec.filter(x => x === 'T').length / w;
+            if (pT >= 0.6) return { code: 'X', name: `KÉO-CB-X-${w}`, conf: clamp(0.52 + (pT - 0.6), 0.52, 0.75) };
+            if (pT <= 0.4) return { code: 'T', name: `KÉO-CB-T-${w}`, conf: clamp(0.52 + (0.4 - pT), 0.52, 0.75) };
+            return null;
+        }});
+    }
+
+    // 11. SUM (Tổng điểm)
+    for (let w = 10; w <= 30; w += 5) {
+        A.push({ id: `sum_${w}`, family: 'sum', base: 1.0, fn: (seq, sums) => {
+            if (!sums || sums.length < w) return null;
+            const rec = sums.slice(-w), half = Math.floor(w / 2);
+            const m1 = rec.slice(0, half).reduce((a, b) => a + b, 0) / half;
+            const m2 = rec.slice(half).reduce((a, b) => a + b, 0) / half;
+            if (m2 - m1 > 2) return { code: 'X', name: `SUM-DOWN-${w}`, conf: 0.62 };
+            if (m1 - m2 > 2) return { code: 'T', name: `SUM-UP-${w}`, conf: 0.62 };
+            return null;
+        }});
+    }
+
+    // 12. CUSUM
+    for (let w = 10; w <= 30; w += 5) {
+        for (let th = 3; th <= 6; th += 1) {
+            A.push({ id: `cusum_${w}_${th}`, family: 'cusum', base: 1.2, fn: (seq) => {
+                const n = seq.length; if (n < w) return null;
+                const rec = seq.slice(-w);
+                let sp = 0, sn = 0;
+                for (const x of rec) {
+                    const v = x === 'T' ? 1 : -1;
+                    sp = Math.max(0, sp + v);
+                    sn = Math.min(0, sn + v);
+                }
+                if (sp >= th) return { code: 'X', name: `CUSUM-DOWN-${w}-${th}`, conf: 0.66 };
+                if (sn <= -th) return { code: 'T', name: `CUSUM-UP-${w}-${th}`, conf: 0.66 };
+                return null;
+            }});
         }
-        if (occ < 2) return null;
-        const pT = (t+1)/(occ+2), pX = (x+1)/(occ+2);
-        return Math.max(pT, pX) > 0.65 ? { code: pT > pX ? 'T' : 'X', name: `NGRAM-${len}`, conf: Math.max(pT, pX) } : null;
-    }});
+    }
 
-    // Markov
-    for (let k = 2; k <= 5; k++) A.push({ id: `markov_${k}`, family: 'markov', base: 1.5, fn: (seq) => {
-        const n = seq.length; if (n < k + 6) return null;
-        const key = seq.slice(-k).join(''); let t = 0, x = 0;
-        for (let i = k; i < n; i++) if (seq.slice(i-k, i).join('') === key) { if (seq[i] === 'T') t++; else x++; }
-        const tot = t + x; if (tot < 3) return null;
-        const pT = (t+1)/(tot+2), pX = (x+1)/(tot+2);
-        return Math.max(pT, pX) > 0.6 ? { code: pT > pX ? 'T' : 'X', name: `MARKOV-${k}`, conf: Math.max(pT, pX) } : null;
-    }});
+    // 13. BAYESIAN
+    for (let k = 2; k <= 5; k++) {
+        A.push({ id: `bayes_${k}`, family: 'bayes', base: 1.4, fn: (seq) => {
+            const n = seq.length; if (n < k + 10) return null;
+            const key = seq.slice(-k).join('');
+            let t = 0, x = 0;
+            for (let i = k; i < n; i++) {
+                if (seq.slice(i - k, i).join('') === key) {
+                    if (seq[i] === 'T') t++; else x++;
+                }
+            }
+            const tot = t + x; if (tot < 4) return null;
+            const pT = (t + 1) / (tot + 2);
+            const conf = Math.max(pT, 1 - pT);
+            if (conf < 0.62) return null;
+            return { code: pT > 0.5 ? 'T' : 'X', name: `BAYES-${k}`, conf };
+        }});
+    }
 
-    // Pull (Kéo cân bằng)
-    for (let w = 20; w <= 40; w += 10) A.push({ id: `pull_${w}`, family: 'pull', base: 1.0, fn: (seq) => {
-        const n = seq.length; if (n < w) return null;
-        const pT = seq.slice(-w).filter(x => x === 'T').length / w;
-        if (pT >= 0.65) return { code: 'X', name: `KÉO-X`, conf: 0.6 };
-        if (pT <= 0.35) return { code: 'T', name: `KÉO-T`, conf: 0.6 };
-        return null;
-    }});
-
-    // Cầu phụ
-    A.push({ id: 'mirror', family: 'mirror', base: 1.3, fn: (seq) => {
-        const n = seq.length; if (n < 8) return null;
-        const w = seq.slice(-4).join('');
-        if (w[0] === w[3] && w[1] === w[2] && w[0] !== w[1]) return { code: flip(w[3]), name: 'GƯƠNG-ABBA', conf: 0.72 };
-        return null;
-    }});
+    // 14. TRANSITION MATRIX
+    for (let w = 30; w <= 100; w += 20) {
+        A.push({ id: `transmat_${w}`, family: 'transmat', base: 1.0, fn: (seq) => {
+            const n = seq.length; if (n < w) return null;
+            const rec = seq.slice(-w);
+            let TT = 0, TX = 0, XT = 0, XX = 0;
+            for (let i = 1; i < rec.length; i++) {
+                if (rec[i - 1] === 'T') rec[i] === 'T' ? TT++ : TX++;
+                else rec[i] === 'T' ? XT++ : XX++;
+            }
+            const last = rec[rec.length - 1];
+            let pT;
+            if (last === 'T') pT = (TT + 1) / (TT + TX + 2);
+            else pT = (XT + 1) / (XT + XX + 2);
+            const conf = Math.max(pT, 1 - pT);
+            if (conf < 0.58) return null;
+            return { code: pT > 0.5 ? 'T' : 'X', name: `TRANS-${w}`, conf };
+        }});
+    }
 
     return A;
 }
+
 const ALL_ALGOS = generateAllPatterns();
+console.log(`✅ Đã nạp ${ALL_ALGOS.length} thuật toán / cầu mẫu.`);
 
 // ========================================================================
-// 4. TỔNG HỢP KHÔNG THIÊN VỊ
+// 4. TỔNG HỢP KHÔNG THIÊN VỊ (UNBIASED ENSEMBLE)
 // ========================================================================
-function runUnbiasedEnsemble(seq, db, env) {
+function runUnbiasedEnsemble(seq, sums, db, env) {
     const disabled = new Set(env.disabledPatterns);
     let votesT = [], votesX = [], details = [];
 
     for (const algo of ALL_ALGOS) {
         if (disabled.has(algo.family)) continue;
-        let res = null; try { res = algo.fn(seq); } catch (e) {}
+        let res = null; try { res = algo.fn(seq, sums, db); } catch (e) {}
         if (!res || !res.code) continue;
 
         const w = db.weights?.[algo.id]?.w || 1.0;
@@ -230,7 +437,7 @@ function runUnbiasedEnsemble(seq, db, env) {
     const sT = votesT.reduce((a, b) => a + b.vote, 0);
     const sX = votesX.reduce((a, b) => a + b.vote, 0);
 
-    // Chia đều (Không thiên vị)
+    // Chia trung bình (Chống thiên vị)
     const scoreT = cT > 0 ? sT / cT : 0;
     const scoreX = cX > 0 ? sX / cX : 0;
 
@@ -272,7 +479,7 @@ function runUnbiasedEnsemble(seq, db, env) {
 }
 
 // ========================================================================
-// 5. FETCH & PROCESS
+// 5. FETCH & PROCESS BACKGROUND
 // ========================================================================
 async function fetchApi(url) {
     try {
@@ -295,21 +502,21 @@ async function processGame(game) {
     const seq = list.map(getResult).filter(Boolean);
     if (seq.length < 5) return;
 
+    updateStreakStats(seq, db);
+
     const env = profileEnvironment(seq);
     db.envProfile = env;
 
-    // Chỉ dự đoán khi >= 15 phiên
     let pred = null;
     if (seq.length >= 15) {
-        pred = runUnbiasedEnsemble(seq, db, env);
+        const sums = list.map(getSum).filter(s => s >= 3 && s <= 18);
+        pred = runUnbiasedEnsemble(seq, sums, db, env);
     }
 
-    // Cập nhật phiên trước
     const prev = db.history[db.history.length - 1];
     if (prev && safeInt(prev.phienDuDoan) === session && prev.DU_DOAN_CODE) {
         const actual = getResult(latest);
         prev.trangThai = prev.DU_DOAN_CODE === actual ? 'ĐÚNG' : 'SAI';
-        // Update weight cơ bản
         for (const d of (prev.algoDetails || [])) {
             if (!db.weights[d.algo]) db.weights[d.algo] = { w: 1.0 };
             if (d.code === actual) db.weights[d.algo].w = clamp(db.weights[d.algo].w + 0.05, 0.5, 2.0);
@@ -340,7 +547,7 @@ async function processGame(game) {
 setInterval(() => { processGame('md5'); processGame('taixiu'); }, TICK_MS);
 
 // ========================================================================
-// 6. ROUTE API JSON (THEO ĐÚNG YÊU CẦU: /taixiu, /md5)
+// 6. ROUTE API JSON (/taixiu, /md5)
 // ========================================================================
 function buildJsonResponse(game, list, db, env, pred) {
     const settled = db.history.filter(h => h.trangThai === 'ĐÚNG' || h.trangThai === 'SAI');
@@ -354,7 +561,7 @@ function buildJsonResponse(game, list, db, env, pred) {
             phienDuDoan: String(safeInt(list[list.length-1].SessionId) + 1),
             duDoan: pred ? pred.code : null,
             tiLe: pred ? pred.tiLe : "—",
-            liDo: pred ? `⭐ ${pred.label} → ${label(pred.code)}` : `⏳ Đang quét ${env.stats.L}/15 phiên để nhận diện...`,
+            liDo: pred ? `⭐ ${pred.label} → ${label(pred.code)} (${pred.tiLe})` : `⏳ Đang quét ${env.stats.L}/15 phiên để nhận diện...`,
             xucXac: getDice(list[list.length-1]),
             tongDiem: getSum(list[list.length-1]),
             moiTruong: {
@@ -378,32 +585,30 @@ function buildJsonResponse(game, list, db, env, pred) {
     };
 }
 
-// Route /taixiu
 app.get('/taixiu', async (req, res) => {
     const list = await fetchApi(API_TX);
     const db = readDB('taixiu');
     if (!list || !list.length) return res.status(500).json({ status: "error", message: "Không lấy được data" });
-    
     const seq = list.map(getResult).filter(Boolean);
+    const sums = list.map(getSum).filter(s => s >= 3 && s <= 18);
     const env = profileEnvironment(seq);
-    const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, db, env) : null;
+    const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, sums, db, env) : null;
     res.json(buildJsonResponse('taixiu', list, db, env, pred));
 });
 
-// Route /md5
 app.get('/md5', async (req, res) => {
     const list = await fetchApi(API_MD5);
     const db = readDB('md5');
     if (!list || !list.length) return res.status(500).json({ status: "error", message: "Không lấy được data" });
-    
     const seq = list.map(getResult).filter(Boolean);
+    const sums = list.map(getSum).filter(s => s >= 3 && s <= 18);
     const env = profileEnvironment(seq);
-    const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, db, env) : null;
+    const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, sums, db, env) : null;
     res.json(buildJsonResponse('md5', list, db, env, pred));
 });
 
 // ========================================================================
-// 7. ROUTE UI (Xem giao diện đẹp)
+// 7. ROUTE UI (Giao diện điện thoại)
 // ========================================================================
 app.get('/ui/:game', (req, res) => {
     const game = req.params.game;
@@ -415,11 +620,10 @@ app.get('/ui/:game', (req, res) => {
     const acc = settled.length ? (correct / settled.length * 100).toFixed(1) : '0.0';
     const env = db.envProfile || { type: 'CHƯA CÓ', confidence: 0, efs: 0, purity: 0, entropy: 1, dominant: null };
 
-    // Trả về HTML giống hệt Hình 1
     res.send(`<!DOCTYPE html>
 <html lang="vi"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>V41 - ${game.toUpperCase()}</title>
+<title>V42 - ${game.toUpperCase()}</title>
 <style>
 *{box-sizing:border-box}
 body{font-family:-apple-system,sans-serif;background:#0a0e27;color:#e6eef6;padding:12px;margin:0;}
@@ -448,7 +652,7 @@ td{padding:8px 3px;text-align:center;border-bottom:1px solid #1e293b;}
 <script>setTimeout(()=>location.reload(), 5000);</script>
 </head><body>
 <div class="header">
-  <h1>V41 · ${game.toUpperCase()}</h1>
+  <h1>V42 · ${game.toUpperCase()}</h1>
   <div class="env-box">
     <div class="env-row"><span>🌍 Môi trường</span><span class="env-val">${env.type}</span></div>
     <div class="env-row"><span>🎯 Độ tin cậy</span><span class="env-val">${(env.confidence*100).toFixed(1)}%</span></div>
@@ -485,4 +689,4 @@ ${rows.map(it => {
 
 app.get('/', (req, res) => res.redirect('/ui/md5'));
 
-app.listen(PORT, () => console.log(`🚀 V41 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 V42 ULTIMATE Server running on port ${PORT}`));
