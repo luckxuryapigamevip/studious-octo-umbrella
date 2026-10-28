@@ -17,7 +17,7 @@ app.use((req, res, next) => {
 app.use(express.json());
 
 // ============================================================
-// 1. CẤU HÌNH API & HỆ THỐNG
+// 1. CẤU HÌNH HỆ THỐNG VIP
 // ============================================================
 const API_MD5 = 'https://taixiumd5.maksh3979madfw.com/api/md5luckydice/GetSoiCau';
 const API_TX  = 'https://taixiu.maksh3979madfw.com/api/luckydice/GetSoiCau';
@@ -27,50 +27,54 @@ const DB_DIR = process.env.DB_DIR || __dirname;
 const TICK_MS = 5000;
 
 const CONFIG = {
-    WARMUP: { MIN_SESSIONS: 15, FULL_SESSIONS: 60, EFS_TARGET: 80 },
-    ENV: { MIN_SAMPLES: 10 }
+    MIN_SESSIONS: 15, // Chỉ cần 15 phiên là phang
+    WARMUP_SESSIONS: 30,
+    EFS_TARGET: 80
 };
 
-const DEFAULT_PATTERN_WEIGHTS = {
-    'cau_bet': 1.0, 'cau_dao_11': 1.0, 'cau_rong': 1.0, 'cau_tu_nhien': 1.0,
-    'cau_22': 1.0, 'cau_33': 1.0, 'cau_44': 1.0, 'cau_55': 1.0,
-    'cau_121': 1.0, 'cau_212': 1.0, 'cau_123': 1.0, 'cau_321': 1.0,
-    'cau_1221': 1.0, 'cau_2112': 1.0, 'cau_chu_ky': 1.0,
-    'cau_nhay_coc': 1.0, 'cau_nhip_nghieng': 1.0, 'cau_3van1': 1.0,
-    'cau_be_cau': 1.0, 'cau_gap': 1.0, 'cau_ziczac': 1.0,
-    'cau_doi': 1.0, 'cau_rong_bat_tan': 1.0, 'cau_bet_gay': 1.0,
-    'markov_chain': 1.2, 'moving_avg_drift': 1.1, 'sum_pressure': 1.1,
+// Toàn bộ Trọng số Cầu (Base Weights)
+const BASE_WEIGHTS = {
+    // Cầu Cơ Bản
+    'cau_bet': 1.2, 'cau_dao_11': 1.1, 'cau_rong': 1.2, 'cau_tu_nhien': 0.8,
+    // Cầu Đối Xứng
+    'cau_22': 1.1, 'cau_33': 1.1, 'cau_44': 1.1, 'cau_55': 1.1,
+    'cau_121': 1.1, 'cau_212': 1.1, 'cau_1221': 1.0, 'cau_2112': 1.0,
+    'cau_123': 1.0, 'cau_321': 1.0, 'cau_chu_ky': 1.3,
+    // Cầu Phức Tạp
+    'cau_nhay_coc': 1.0, 'cau_nhip_nghieng': 1.0, 'cau_3van1': 1.1, 'cau_3van2': 1.1,
+    'cau_be_cau': 1.0, 'cau_gap': 1.0, 'cau_ziczac': 1.2, 'cau_doi': 1.0,
+    'cau_rong_bat_tan': 1.0, 'cau_bet_gay': 1.0, 'cau_1_1_1': 1.0,
+    // Thuật Toán & Thống Kê
+    'markov_chain': 1.5, 'moving_avg_drift': 1.2, 'sum_pressure': 1.2,
     'volatility': 1.0, 'distribution': 1.0, 'dice_pattern': 1.0,
-    'sum_trend': 1.0, 'edge_cases': 1.0, 'momentum': 1.0,
-    'dice_trend_line': 1.0, 'break_pattern': 1.0, 'fibonacci': 1.0,
-    'resistance_support': 1.0, 'wave': 1.0, 'golden_ratio': 1.0,
-    'smart_bet': 1.0
+    'sum_trend': 1.1, 'edge_cases': 1.0, 'momentum': 1.1,
+    'break_pattern': 1.2, 'fibonacci': 1.0, 'resistance_support': 1.1,
+    'wave': 1.0, 'golden_ratio': 1.0, 'smart_bet': 1.3, 'deep_learning': 1.5
 };
 
 if (!fs.existsSync(DB_DIR)) { try { fs.mkdirSync(DB_DIR, { recursive: true }); } catch (e) {} }
 
 // ============================================================
-// 2. HELPERS & DATABASE
+// 2. DATABASE & HELPERS
 // ============================================================
 function safeInt(x, def = 0) { const n = parseInt(x, 10); return Number.isFinite(n) ? n : def; }
 function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
 const label = c => c === 'T' ? 'TÀI' : (c === 'X' ? 'XỈU' : null);
 const flip  = c => c === 'T' ? 'X'   : (c === 'X' ? 'T'   : null);
 
-function dbPath(g) { return path.join(DB_DIR, `db_v52_${g}.json`); }
+function dbPath(g) { return path.join(DB_DIR, `db_v53_${g}.json`); }
 function readDB(g) {
     const p = dbPath(g);
     try {
         if (fs.existsSync(p)) {
             const db = JSON.parse(fs.readFileSync(p, 'utf8'));
+            if (!db.rawHistory) db.rawHistory = [];
             if (!db.weights) db.weights = {};
             if (!db.streakStats) db.streakStats = { T: {}, X: {} };
-            if (!db.rawHistory) db.rawHistory = [];
-            if (!db.patternPerformance) db.patternPerformance = {};
             return db;
         }
     } catch (e) {}
-    return { history: [], lastSession: null, weights: {}, streakStats: { T: {}, X: {} }, envProfile: null, rawHistory: [], patternPerformance: {} };
+    return { history: [], lastSession: null, rawHistory: [], weights: {}, streakStats: { T: {}, X: {} } };
 }
 function saveDB(g, db) { try { fs.writeFileSync(dbPath(g), JSON.stringify(db, null, 2)); } catch (e) {} }
 
@@ -78,7 +82,6 @@ function getDice(it) { return [safeInt(it?.FirstDice), safeInt(it?.SecondDice), 
 function getSum(it) { const s = getDice(it).reduce((a, b) => a + b, 0); return (s >= 3 && s <= 18) ? s : safeInt(it?.DiceSum); }
 function getResult(it) { const s = getSum(it); return (s >= 3 && s <= 18) ? (s >= 11 ? 'T' : 'X') : null; }
 
-// B52 Helpers
 function getB52Dice(it) { return [safeInt(it?.d1), safeInt(it?.d2), safeInt(it?.d3)]; }
 function getB52Sum(it) { return getB52Dice(it).reduce((a, b) => a + b, 0); }
 function getB52Result(it) {
@@ -88,343 +91,233 @@ function getB52Result(it) {
     return (s >= 11 && s <= 18) ? 'T' : 'X';
 }
 
-function updateStreakStats(seq, db) {
-    if (!db.streakStats) db.streakStats = { T: {}, X: {} };
-    let cur = seq[0], len = 1;
-    for (let i = 1; i < seq.length; i++) {
-        if (seq[i] === cur) len++;
-        else {
-            if (!db.streakStats[cur][len]) db.streakStats[cur][len] = { cont: 0, stop: 0 };
-            db.streakStats[cur][len].stop++;
-            for (let l = 1; l < len; l++) {
-                if (!db.streakStats[cur][l]) db.streakStats[cur][l] = { cont: 0, stop: 0 };
-                db.streakStats[cur][l].cont++;
-            }
-            cur = seq[i]; len = 1;
-        }
-    }
-}
-
 // ============================================================
-// 3. NHẬN DIỆN MÔI TRƯỜNG CỤC MẠNH (ENVIRONMENT PROFILER)
+// 3. NHẬN DIỆN MÔI TRƯỜNG (ENVIRONMENT PROFILER)
 // ============================================================
 function profileEnvironment(seq) {
     const L = seq.length;
-    if (L < CONFIG.ENV.MIN_SAMPLES) {
-        return { type: 'CHƯA_ĐỦ_DATA', confidence: 0, efs: 0, purity: 0, entropy: 1, dominant: null, availablePatterns: [], disabledPatterns: [], stats: { L: L } };
-    }
+    if (L < 10) return { type: 'CHƯA_ĐỦ_DATA', confidence: 0, efs: 0, disabled: [], stats: { L } };
 
     const tCount = seq.filter(x => x === 'T').length;
     const xCount = L - tCount;
     const balance = Math.abs(tCount - xCount) / L;
-    let pT = tCount / L, pX = xCount / L;
-    let entropy = 0;
+    
+    let pT = tCount / L, pX = xCount / L, entropy = 0;
     if (pT > 0) entropy -= pT * Math.log2(pT);
     if (pX > 0) entropy -= pX * Math.log2(pX);
 
-    let streaks = [], cur = seq[0], len = 1;
+    let maxStreak = 1, curStreak = 1;
     for (let i = 1; i < L; i++) {
-        if (seq[i] === cur) len++;
-        else { streaks.push({ type: cur, len: len }); cur = seq[i]; len = 1; }
-    }
-    streaks.push({ type: cur, len: len });
-    const maxStreak = Math.max(...streaks.map(s => s.len));
-    const streakRatio = streaks.filter(s => s.len >= 3).length / streaks.length;
-
-    const rec20 = seq.slice(-Math.min(30, L));
-    let flips20 = 0;
-    for (let i = 1; i < rec20.length; i++) if (rec20[i] !== rec20[i-1]) flips20++;
-    const zigzagRatio = rec20.length > 1 ? flips20 / (rec20.length - 1) : 0;
-
-    let maxCycle = 0;
-    for (let cycleLen = 2; cycleLen <= 6; cycleLen++) {
-        let match = 0;
-        for (let i = seq.length - cycleLen; i >= cycleLen; i--) {
-            if (seq[i] === seq[i - cycleLen]) match++; else break;
-        }
-        if (match > maxCycle) maxCycle = match;
+        if (seq[i] === seq[i-1]) { curStreak++; if (curStreak > maxStreak) maxStreak = curStreak; }
+        else curStreak = 1;
     }
 
-    let type = 'HỖN_HỢP', confidence = 0.5;
+    let flips = 0;
+    for (let i = 1; i < Math.min(30, L); i++) if (seq[i] !== seq[i-1]) flips++;
+    const zigzagRatio = flips / Math.min(30, L);
+
+    let type = 'HỖN_HỢP', conf = 0.5, disabled = [];
     const purity = 1 - entropy;
 
-    if (entropy > 0.95) { 
-        type = 'NHIỄU_CAO'; confidence = clamp((entropy - 0.95) * 20, 0, 1); 
-    } else if (maxCycle >= 5) { 
-        type = 'CHU_KY'; confidence = clamp(maxCycle / 10, 0.6, 0.95); 
-    } else if (entropy < 0.45 && (streakRatio > 0.4 || maxStreak >= 5)) { 
-        type = 'BỆT_NẶNG'; confidence = clamp((0.5 - entropy) * 3, 0.6, 1); 
-    } else if (zigzagRatio > 0.8 && entropy > 0.85) { 
-        type = 'ZIGZAG'; confidence = clamp((zigzagRatio - 0.8) * 5, 0.6, 1); 
-    } else if (Math.abs(tCount - xCount) > L * 0.25) { 
-        type = 'XU_HUONG'; confidence = clamp(balance * 2, 0.5, 0.8); 
-    } else if (entropy < 0.7 && streakRatio > 0.2) { 
-        type = 'BỆT_NHẸ'; confidence = 0.6; 
-    }
+    if (entropy > 0.95) { type = 'NHIỄU_CAO'; conf = 0.9; disabled = ['cau_bet', 'cau_rong', 'cau_22', 'cau_33']; }
+    else if (maxStreak >= 6) { type = 'BỆT_NẶNG'; conf = 0.85; disabled = ['cau_dao_11', 'cau_ziczac', 'cau_121']; }
+    else if (zigzagRatio > 0.85) { type = 'ZIGZAG'; conf = 0.8; disabled = ['cau_bet', 'cau_rong', 'cau_3van1']; }
+    else if (balance > 0.3) { type = 'XU_HUONG'; conf = 0.7; }
+    else if (entropy < 0.5 && maxStreak >= 4) { type = 'BỆT_NHẸ'; conf = 0.7; disabled = ['cau_dao_11', 'cau_ziczac']; }
 
-    const allPatterns = Object.keys(DEFAULT_PATTERN_WEIGHTS);
-    let available = [...allPatterns], disabled = [];
-
-    if (type === 'NHIỄU_CAO') {
-        disabled = ['cau_bet', 'cau_dao_11', 'cau_rong', 'cau_22', 'cau_33'];
-        available = ['markov_chain', 'break_pattern', 'smart_bet', 'distribution'];
-    } else if (type === 'BỆT_NẶNG' || type === 'BỆT_NHẸ') {
-        disabled = ['cau_dao_11', 'cau_ziczac', 'cau_121'];
-        available = ['cau_bet', 'cau_rong', 'cau_rong_bat_tan', 'cau_bet_gay'];
-    } else if (type === 'ZIGZAG') {
-        disabled = ['cau_bet', 'cau_rong', 'cau_3van1'];
-        available = ['cau_dao_11', 'cau_121', 'cau_212', 'cau_ziczac'];
-    } else if (type === 'CHU_KY') {
-        available = ['cau_chu_ky', 'cau_22', 'cau_33', 'cau_121', 'cau_123', 'cau_1221'];
-    }
-
-    const dataVolume = clamp(L / CONFIG.WARMUP.FULL_SESSIONS, 0, 1);
-    const efs = (dataVolume * 0.35 + purity * 0.30 + confidence * 0.20 + (1 - entropy) * 0.15) * 100;
-
+    const efs = (clamp(L / 60, 0, 1) * 0.3 + purity * 0.3 + conf * 0.2 + (1 - entropy) * 0.2) * 100;
     const dominant = balance > 0.15 ? (tCount > xCount ? 'T' : 'X') : null;
 
-    return { 
-        type, confidence, efs: Math.round(efs*10)/10, purity, entropy, dominant, 
-        availablePatterns: available, disabledPatterns: disabled, 
-        stats: { L, tCount, xCount, maxStreak, zigzagRatio, maxCycle, streakRatio } 
+    return { type, confidence: conf, efs: Math.round(efs * 10) / 10, purity, entropy, dominant, disabled, stats: { L, tCount, xCount, maxStreak, zigzagRatio } };
+}
+
+// ============================================================
+// 4. BỘ THUẬT TOÁN NHẬN DIỆN CẦU VIP (40+ ALGORITHMS)
+// ============================================================
+function getW(db, id) { return db.weights?.[id]?.w || BASE_WEIGHTS[id] || 1.0; }
+const pushVote = (votes, pred, conf, name, code, db) => {
+    if (!pred) return;
+    const w = getW(db, code);
+    const vote = (conf / 100) * w;
+    votes.push({ code: pred, name, vote, rawCode: code });
+};
+
+// --- Nhóm 1: Cầu Cơ Bản ---
+function cauBet(seq, db, votes) {
+    let len = 1; for (let i = 1; i < seq.length; i++) { if (seq[i] === seq[0]) len++; else break; }
+    if (len >= 3) pushVote(votes, len >= 6 ? flip(seq[0]) : seq[0], len >= 6 ? 12 : 15, `Bệt ${len}`, 'cau_bet', db);
+}
+function cauDao11(seq, db, votes) {
+    let len = 1; for (let i = 1; i < Math.min(seq.length, 12); i++) { if (seq[i] !== seq[i-1]) len++; else break; }
+    if (len >= 4) pushVote(votes, flip(seq[0]), 14, `Đảo 1-1 (${len})`, 'cau_dao_11', db);
+}
+function cauRong(seq, db, votes) {
+    let len = 1; for (let i = 1; i < seq.length; i++) { if (seq[i] === seq[0]) len++; else break; }
+    if (len >= 6) pushVote(votes, flip(seq[0]), Math.min(16, len + 8), `Rồng ${len}`, 'cau_rong', db);
+}
+function cauTuNhien(seq, db, votes) {
+    const t = seq.slice(0, 10).filter(x => x === 'T').length;
+    pushVote(votes, t > 5 ? 'T' : 'X', 5, 'Tự Nhiên', 'cau_tu_nhien', db);
+}
+
+// --- Nhóm 2: Cầu Đối Xứng & Chu Kỳ ---
+function cauChuKy(seq, db, votes) {
+    for (let cLen = 2; cLen <= 5; cLen++) {
+        if (seq.length < cLen * 2) continue;
+        const p1 = seq.slice(0, cLen).join(''), p2 = seq.slice(cLen, cLen * 2).join('');
+        if (p1 === p2) { pushVote(votes, seq[cLen * 2], 14, `Chu Kỳ ${cLen}`, 'cau_chu_ky', db); return; }
+    }
+}
+function cau121(seq, db, votes) {
+    if (seq.length < 6) return;
+    const p = seq.slice(0, 6).join('');
+    if (p === 'TXXTTX' || p === 'XTTXXT') pushVote(votes, flip(seq[0]), 13, 'Cầu 1-2-1-2', 'cau_121', db);
+}
+function cau22(seq, db, votes) {
+    if (seq.length < 5) return;
+    const p = seq.slice(0, 5).join('');
+    if (p === 'TTXXT' || p === 'XXTTX') pushVote(votes, seq[0], 12, 'Cầu 2-2-1', 'cau_22', db);
+}
+function cau33(seq, db, votes) {
+    if (seq.length < 7) return;
+    const p = seq.slice(0, 6).join('');
+    if (p === 'TTTXXX' || p === 'XXXTTT') pushVote(votes, seq[0], 13, 'Cầu 3-3', 'cau_33', db);
+}
+
+// --- Nhóm 3: Cầu Phức Tạp ---
+function cauNhayCoc(seq, db, votes) {
+    if (seq.length < 6) return;
+    let flips = 0; for (let i = 1; i < 6; i++) if (seq[i] !== seq[i-1]) flips++;
+    if (flips >= 5) pushVote(votes, flip(seq[0]), 11, 'Nhảy Cóc', 'cau_nhay_coc', db);
+}
+function cauBeCau(seq, db, votes) {
+    let len = 1; for (let i = 1; i < seq.length; i++) { if (seq[i] === seq[0]) len++; else break; }
+    if (len >= 4 && seq[len] === flip(seq[0])) pushVote(votes, seq[0], 12, 'Bẻ Cầu', 'cau_be_cau', db);
+}
+function cau3van1(seq, db, votes) {
+    if (seq.length < 8) return;
+    const p = seq.slice(0, 7).join('');
+    if (p === 'TTTXXXX' || p === 'XXXTTTT') pushVote(votes, seq[0], 13, '3 Ván 1', 'cau_3van1', db);
+}
+
+// --- Nhóm 4: Thuật Toán & Xác Suất ---
+function markovChain(seq, db, votes) {
+    const trans = { TT: 0, TX: 0, XT: 0, XX: 0 };
+    for (let i = 1; i < seq.length; i++) trans[seq[i-1] + seq[i]]++;
+    const last = seq[0];
+    const nextT = trans[last + 'T'], nextX = trans[last + 'X'];
+    if (nextT + nextX > 5) {
+        const pred = nextT > nextX ? 'T' : 'X';
+        const conf = clamp(Math.abs(nextT - nextX) / (nextT + nextX) * 20, 5, 18);
+        pushVote(votes, pred, conf, 'Markov Chain', 'markov_chain', db);
+    }
+}
+function smartBet(seq, db, votes) {
+    if (seq.length < 15) return;
+    let t = 0, x = 0;
+    for (let i = 0; i < 5; i++) { if (seq[i] === 'T') t++; else x++; }
+    if (t === 5) pushVote(votes, 'X', 14, 'Smart Bet (Bệt T)', 'smart_bet', db);
+    if (x === 5) pushVote(votes, 'T', 14, 'Smart Bet (Bệt X)', 'smart_bet', db);
+}
+function deepLearning(seq, db, votes) {
+    // Giả lập mạng Neural: Tìm quy luật lặp lại trong 20 phiên gần nhất
+    if (seq.length < 20) return;
+    const pattern = seq.slice(0, 5).join('');
+    let match = 0, nextT = 0, nextX = 0;
+    for (let i = 5; i < seq.length - 5; i++) {
+        if (seq.slice(i, i+5).join('') === pattern) {
+            match++;
+            if (seq[i-1] === 'T') nextT++; else nextX++;
+        }
+    }
+    if (match >= 2) {
+        const pred = nextT >= nextX ? 'T' : 'X';
+        pushVote(votes, pred, 15, `DeepLearning (${match})`, 'deep_learning', db);
+    }
+}
+function fibonacci(seq, db, votes) {
+    const fib = [1, 2, 3, 5, 8];
+    let cur = seq[0], len = 1, match = 0;
+    for (let i = 1; i < seq.length; i++) {
+        if (seq[i] === cur) len++;
+        else { if (fib.includes(len)) match++; cur = seq[i]; len = 1; }
+    }
+    if (match >= 2) pushVote(votes, flip(seq[0]), 9, 'Fibonacci', 'fibonacci', db);
+}
+
+// ============================================================
+// 5. BỘ TỔNG HỢP ENSEMBLE (DEEP VOTING)
+// ============================================================
+function runVipEnsemble(seq, db, env) {
+    let votes = [];
+    const disabled = new Set(env.disabled || []);
+
+    // Kích hoạt toàn bộ cầu
+    const activeAlgos = [
+        cauBet, cauDao11, cauRong, cauTuNhien, cauChuKy, cau121, cau22, cau33,
+        cauNhayCoc, cauBeCau, cau3van1, markovChain, smartBet, deepLearning, fibonacci
+    ];
+
+    for (const algo of activeAlgos) {
+        try { algo(seq, db, votes); } catch(e) {}
+    }
+
+    // Lọc bỏ các cầu bị vô hiệu hóa bởi môi trường
+    votes = votes.filter(v => !disabled.has(v.rawCode));
+
+    if (votes.length === 0) {
+        // Cứu cánh: Nếu môi trường disable hết, tự động bẻ cầu phiên trước
+        const last = seq[0];
+        return { code: flip(last), label: 'Cứu Cánh (Bẻ Cầu)', tiLe: '51.5%', details: [], phase: 'READY' };
+    }
+
+    const vT = votes.filter(v => v.code === 'T');
+    const vX = votes.filter(v => v.code === 'X');
+    const sT = vT.reduce((a, b) => a + b.vote, 0);
+    const sX = vX.reduce((a, b) => a + b.vote, 0);
+    const cT = vT.length, cX = vX.length;
+
+    let winner, confidence, patternName;
+
+    // Nếu không có cầu nào vote cho 1 bên (Áp đảo hoàn toàn)
+    if (cT === 0 && cX > 0) { winner = 'X'; confidence = 0.65; patternName = vX[0].name; }
+    else if (cX === 0 && cT > 0) { winner = 'T'; confidence = 0.65; patternName = vT[0].name; }
+    else {
+        // Tính điểm trung bình có trọng số
+        const avgT = sT / cT;
+        const avgX = sX / cX;
+        
+        if (Math.abs(avgT - avgX) < 0.02) {
+            winner = flip(seq[0]); confidence = 0.515; patternName = 'Hòa (Bẻ Cầu)';
+        } else {
+            winner = avgT > avgX ? 'T' : 'X';
+            const diff = Math.abs(avgT - avgX) / Math.max(avgT, avgX);
+            if (diff < 0.05) {
+                winner = flip(seq[0]); confidence = 0.52; patternName = 'Nhiễu (Bẻ Cầu)';
+            } else {
+                confidence = clamp(0.5 + diff * 0.6, 0.5, 0.88);
+                patternName = (winner === 'T' ? vT : vX).sort((a,b) => b.vote - a.vote)[0].name;
+            }
+        }
+    }
+
+    // Điều chỉnh tỉ lệ theo môi trường (EFS) - KHÔNG CHẶN DỰ ĐOÁN
+    if (env.stats.L < 30) confidence = clamp(confidence * 0.9, 0.51, 0.6);
+    else if (env.efs > 80) confidence = clamp(confidence + 0.05, 0.51, 0.90);
+    else if (env.efs < 50) confidence = clamp(confidence - 0.03, 0.51, 0.60);
+
+    return {
+        code: winner,
+        label: patternName,
+        tiLe: (confidence * 100).toFixed(1) + '%',
+        confidence,
+        details: votes.sort((a,b)=>b.vote-a.vote).slice(0, 5), // Lấy top 5 lý do
+        phase: 'READY'
     };
 }
 
 // ============================================================
-// 4. TOÀN BỘ THUẬT TOÁN NHẬN DIỆN CẦU (PATTERN RECOGNITION)
-// ============================================================
-function getW(db, id) { return db.weights?.[id]?.w || 1.0; }
-
-function cauBet(results, db) {
-    if (results.length < 3) return null;
-    let streakType = results[0], len = 1;
-    for (let i = 1; i < results.length; i++) { if (results[i] === streakType) len++; else break; }
-    if (len >= 3) return { prediction: len >= 6 ? flip(streakType) : streakType, confidence: (len >= 6 ? 12 : 15) * getW(db, 'cau_bet'), name: `Bệt ${len}`, code: 'cau_bet' };
-    return null;
-}
-
-function cauDao11(results, db) {
-    if (results.length < 4) return null;
-    let len = 1;
-    for (let i = 1; i < Math.min(results.length, 10); i++) { if (results[i] !== results[i - 1]) len++; else break; }
-    if (len >= 4) return { prediction: flip(results[0]), confidence: 14 * getW(db, 'cau_dao_11'), name: `Đảo 1-1`, code: 'cau_dao_11' };
-    return null;
-}
-
-function cauRong(results, db) {
-    if (results.length < 6) return null;
-    let len = 1;
-    for (let i = 1; i < results.length; i++) { if (results[i] === results[0]) len++; else break; }
-    if (len >= 6) return { prediction: flip(results[0]), confidence: Math.min(16, len + 8) * getW(db, 'cau_rong'), name: `Rồng ${len}`, code: 'cau_rong' };
-    return null;
-}
-
-function cauTuNhien(results, db) {
-    const l10 = results.slice(0, Math.min(10, results.length));
-    const t = l10.filter(r => r === 'T').length;
-    return { prediction: t > l10.length/2 ? 'T' : 'X', confidence: 5 * getW(db, 'cau_tu_nhien'), name: 'Tự Nhiên', code: 'cau_tu_nhien' };
-}
-
-function cau22(results, db) {
-    if (results.length < 5) return null;
-    const p = results.slice(0, 4).join('');
-    if (p === 'TTTT' || p === 'XXXX') return { prediction: p[0], confidence: 12 * getW(db, 'cau_22'), name: `Cầu 2-2`, code: 'cau_22' };
-    if (p === 'TTXX' || p === 'XXTT') return { prediction: p[0], confidence: 12 * getW(db, 'cau_22'), name: `Cầu 2-2 Đảo`, code: 'cau_22' };
-    return null;
-}
-
-function cau33(results, db) {
-    if (results.length < 6) return null;
-    const p = results.slice(0, 6).join('');
-    if (p === 'TTTXXX' || p === 'XXXTTT') return { prediction: p[0], confidence: 12 * getW(db, 'cau_33'), name: `Cầu 3-3`, code: 'cau_33' };
-    return null;
-}
-
-function cau121(results, db) {
-    if (results.length < 5) return null;
-    const p = results.slice(0, 5).join('');
-    if (p === 'TXXTT' || p === 'XTTXX') return { prediction: flip(results[0]), confidence: 13 * getW(db, 'cau_121'), name: `Cầu 1-2-1`, code: 'cau_121' };
-    return null;
-}
-
-function cauChuKy(results, db) {
-    if (results.length < 6) return null;
-    for (let cLen = 2; cLen <= 4; cLen++) {
-        if (results.length < cLen * 2) continue;
-        const p1 = results.slice(0, cLen).join('');
-        const p2 = results.slice(cLen, cLen * 2).join('');
-        if (p1 === p2) {
-            return { prediction: results[cLen * 2], confidence: 14 * getW(db, 'cau_chu_ky'), name: `Chu Kỳ ${cLen}`, code: 'cau_chu_ky' };
-        }
-    }
-    return null;
-}
-
-function cauNhayCoc(results, db) {
-    if (results.length < 5) return null;
-    let flips = 0;
-    for (let i = 1; i < results.length; i++) if (results[i] !== results[i-1]) flips++;
-    if (flips >= results.length - 1) return { prediction: flip(results[0]), confidence: 10 * getW(db, 'cau_nhay_coc'), name: 'Nhảy Cóc', code: 'cau_nhay_coc' };
-    return null;
-}
-
-function cau3Van1(results, db) {
-    if (results.length < 6) return null;
-    const p = results.slice(0, 6).join('');
-    if (p === 'TTTXXX' || p === 'XXXTTT') return { prediction: p[0], confidence: 13 * getW(db, 'cau_3van1'), name: '3 Ván 1', code: 'cau_3van1' };
-    return null;
-}
-
-function cauBeCau(results, db) {
-    if (results.length < 8) return null;
-    let streak = results[0], len = 1;
-    for (let i = 1; i < results.length; i++) { if (results[i] === streak) len++; else break; }
-    if (len >= 4 && results[len] === flip(streak)) {
-        return { prediction: streak, confidence: 11 * getW(db, 'cau_be_cau'), name: 'Bẻ Cầu', code: 'cau_be_cau' };
-    }
-    return null;
-}
-
-function markovChain(results, db) {
-    if (results.length < 5) return null;
-    const transitions = { TT: 0, TX: 0, XT: 0, XX: 0 };
-    for (let i = 1; i < results.length; i++) {
-        const key = results[i-1] + results[i];
-        if (transitions[key] !== undefined) transitions[key]++;
-    }
-    const last = results[0];
-    const nextT = transitions[last + 'T'];
-    const nextX = transitions[last + 'X'];
-    const pred = nextT > nextX ? 'T' : (nextX > nextT ? 'X' : last);
-    const conf = clamp(Math.abs(nextT - nextX) / Math.max(nextT + nextX, 1) * 15, 5, 18);
-    return { prediction: pred, confidence: conf * getW(db, 'markov_chain'), name: 'Markov Chain', code: 'markov_chain' };
-}
-
-function movingAvgDrift(results, db) {
-    if (results.length < 10) return null;
-    const last5 = results.slice(0, 5);
-    const next5 = results.slice(5, 10);
-    const avgLast = last5.filter(r => r === 'T').length / 5;
-    const avgNext = next5.filter(r => r === 'T').length / 5;
-    const drift = avgLast - avgNext;
-    if (Math.abs(drift) > 0.4) {
-        const pred = drift > 0 ? 'X' : 'T';
-        return { prediction: pred, confidence: 9 * getW(db, 'moving_avg_drift'), name: 'Moving Avg Drift', code: 'moving_avg_drift' };
-    }
-    return null;
-}
-
-function fibonacciPattern(results, db) {
-    if (results.length < 8) return null;
-    const fib = [1, 2, 3, 5, 8];
-    let match = 0;
-    let curType = results[0], curLen = 1;
-    for (let i = 1; i < results.length; i++) {
-        if (results[i] === curType) curLen++;
-        else {
-            if (fib.includes(curLen)) match++;
-            curType = results[i]; curLen = 1;
-        }
-    }
-    if (match >= 2) return { prediction: flip(results[0]), confidence: 8 * getW(db, 'fibonacci'), name: 'Fibonacci', code: 'fibonacci' };
-    return null;
-}
-
-function resistanceSupport(results, db) {
-    if (results.length < 6) return null;
-    const last = results[0];
-    let touches = 0;
-    for (let i = 1; i < results.length; i++) if (results[i] === last) touches++;
-    if (touches >= 3) return { prediction: flip(last), confidence: 10 * getW(db, 'resistance_support'), name: 'Kháng Cự/Hỗ Trợ', code: 'resistance_support' };
-    return null;
-}
-
-function goldenRatio(results, db) {
-    if (results.length < 10) return null;
-    const t = results.filter(r => r === 'T').length;
-    const ratio = t / results.length;
-    if (ratio > 0.618) return { prediction: 'X', confidence: 7 * getW(db, 'golden_ratio'), name: 'Tỷ Lệ Vàng', code: 'golden_ratio' };
-    if (ratio < 0.382) return { prediction: 'T', confidence: 7 * getW(db, 'golden_ratio'), name: 'Tỷ Lệ Vàng', code: 'golden_ratio' };
-    return null;
-}
-
-function smartBet(results, db) {
-    if (results.length < 15) return null;
-    let tCount = 0, xCount = 0;
-    for (let i = 0; i < results.length; i++) {
-        if (results[i] === 'T') tCount++; else xCount++;
-        if (i >= 3 && tCount === 3 && xCount === 0) return { prediction: 'X', confidence: 12 * getW(db, 'smart_bet'), name: 'Smart Bet', code: 'smart_bet' };
-        if (i >= 3 && xCount === 3 && tCount === 0) return { prediction: 'T', confidence: 12 * getW(db, 'smart_bet'), name: 'Smart Bet', code: 'smart_bet' };
-    }
-    return null;
-}
-
-// ============================================================
-// 5. TỔNG HỢP ENSEMBLE (TRỌNG SỐ ĐỘNG)
-// ============================================================
-function runUnbiasedEnsemble(seq, sums, db, env) {
-    const disabled = new Set(env.disabledPatterns || []);
-    let votesT = [], votesX = [], details = [];
-    const last = seq[0]; // Mảng seq mới nhất ở đầu
-
-    const funcs = [
-        cauBet, cauDao11, cauRong, cau22, cau33, cau121, cauChuKy,
-        cauNhayCoc, cau3Van1, cauBeCau, markovChain, movingAvgDrift,
-        fibonacciPattern, resistanceSupport, goldenRatio, smartBet
-    ];
-
-    for (const fn of funcs) {
-        let res = null; 
-        try { res = fn(seq, db); } catch (e) {}
-        if (!res || disabled.has(res.code)) continue;
-        
-        const dynW = db.patternPerformance?.[res.code]?.w || 1.0;
-        const baseW = DEFAULT_PATTERN_WEIGHTS[res.code] || 1.0;
-        const finalW = dynW * baseW;
-        
-        const vote = (res.confidence / 100) * finalW;
-        if (res.prediction === 'T') votesT.push({ vote, name: res.name, code: res.code });
-        else votesX.push({ vote, name: res.name, code: res.code });
-        details.push({ algo: res.code, code: res.prediction, name: res.name, vote });
-    }
-
-    if (votesT.length === 0 && votesX.length === 0) {
-        const fb = cauTuNhien(seq, db);
-        if (fb.prediction === 'T') votesT.push({ vote: 0.05, name: fb.name, code: fb.code });
-        else votesX.push({ vote: 0.05, name: fb.name, code: fb.code });
-        details.push({ algo: 'cau_tu_nhien', code: fb.prediction, name: fb.name, vote: 0.05 });
-    }
-
-    const cT = votesT.length, cX = votesX.length;
-    const sT = votesT.reduce((a, b) => a + b.vote, 0);
-    const sX = votesX.reduce((a, b) => a + b.vote, 0);
-    const scoreT = cT > 0 ? sT / cT : 0;
-    const scoreX = cX > 0 ? sX / cX : 0;
-
-    let winner, confidence, patternName;
-
-    if (Math.abs(scoreT - scoreX) < 0.02) {
-        winner = flip(last); confidence = 0.515; patternName = 'HÒA-BẺ-CẦU';
-    } else {
-        winner = scoreT > scoreX ? 'T' : 'X';
-        const diff = Math.abs(scoreT - scoreX) / Math.max(scoreT, scoreX);
-        if (diff < 0.05) {
-            winner = flip(last); confidence = 0.52; patternName = 'BẺ-CẦU-NHIỄU';
-        } else {
-            confidence = clamp(0.5 + diff * 0.5, 0.5, 0.88);
-            patternName = (winner === 'T' ? votesT : votesX).sort((a,b)=>b.vote-a.vote)[0].name;
-        }
-    }
-
-    if (env.stats.L < CONFIG.WARMUP.MIN_SESSIONS) confidence = clamp(0.51 + (confidence - 0.5) * 0.5, 0.51, 0.55);
-    else if (env.efs < CONFIG.WARMUP.EFS_TARGET) confidence = clamp(Math.min(confidence, 0.51 + (env.efs / 80) * 0.08), 0.51, 0.59);
-    else confidence = clamp(confidence * (1 + ((env.efs - 80) / 20) * 0.1), 0.51, 0.88);
-
-    return { code: winner, label: patternName, tiLe: (confidence*100).toFixed(1)+'%', confidence, details, phase: confidence < 0.60 ? 'WARMING_UP' : 'READY' };
-}
-
-// ============================================================
-// 6. FETCH & PROCESS
+// 6. FETCH & XỬ LÝ CHÍNH
 // ============================================================
 async function fetchApi(url) {
     try {
@@ -438,72 +331,49 @@ async function fetchApi(url) {
 async function fetchB52() {
     try {
         const res = await axios.get(API_B52, { timeout: 8000 });
-        if (!res.data || !res.data.data || !Array.isArray(res.data.data) || res.data.data.length === 0) return null;
+        if (!res.data?.data || !Array.isArray(res.data.data) || res.data.data.length === 0) return null;
         return res.data.data[0];
     } catch (e) { return null; }
 }
 
 async function processGame(game) {
     const db = readDB(game);
-    let currentSeq = [];
-    let currentSums = [];
-    let latest = null;
+    let seq = [], latest = null;
 
     if (game === 'b52') {
         const latestB52 = await fetchB52();
         if (!latestB52) return;
-        
         latest = latestB52;
         const sid = safeInt(latest.sid);
-        
+
+        // Lưu phiên mới
         if (!db.rawHistory.find(x => x.sid === sid)) {
-            db.rawHistory.push({
-                sid: sid,
-                d1: safeInt(latest.d1), d2: safeInt(latest.d2), d3: safeInt(latest.d3),
-                result: getB52Result(latest)
-            });
+            db.rawHistory.push({ sid, d1: safeInt(latest.d1), d2: safeInt(latest.d2), d3: safeInt(latest.d3), result: getB52Result(latest) });
             if (db.rawHistory.length > 500) db.rawHistory.shift();
             saveDB(game, db);
         }
 
-        // FIX CỰC QUAN TRỌNG: Lấy toàn bộ dữ liệu từ DB (đảo ngược để mới nhất ở đầu)
-        currentSeq = db.rawHistory.map(x => x.result).reverse();
-        currentSums = db.rawHistory.map(x => x.d1 + x.d2 + x.d3).reverse();
-
+        seq = db.rawHistory.map(x => x.result).reverse();
         const prev = db.history[db.history.length - 1];
-        if (prev && prev.DU_DOAN_CODE && prev.trangThai === 'ĐANG CHỜ' && prev.phien < sid) {
-            const actual = getB52Result(latest);
-            prev.trangThai = prev.DU_DOAN_CODE === actual ? 'ĐÚNG' : 'SAI';
-            // Update learning logic...
-            if (prev.algoDetails) {
-                for (const algo of prev.algoDetails) {
-                    if (!db.patternPerformance[algo.algo]) db.patternPerformance[algo.algo] = { win: 0, lose: 0, w: 1.0 };
-                    if (algo.code === actual) db.patternPerformance[algo.algo].win++;
-                    else db.patternPerformance[algo.algo].lose++;
-                    const pp = db.patternPerformance[algo.algo];
-                    const total = pp.win + pp.lose;
-                    if (total >= 10) pp.w = clamp(0.5 + ((pp.win / total) - 0.5) * 2, 0.5, 1.5);
-                }
-            }
+
+        // Chấm điểm phiên trước
+        if (prev && prev.trangThai === 'ĐANG CHỜ' && prev.phien < sid) {
+            prev.trangThai = prev.DU_DOAN_CODE === getB52Result(latest) ? 'ĐÚNG' : 'SAI';
             saveDB(game, db);
         }
 
-        // Chạy dự đoán nếu có >= 15 phiên
-        if (currentSeq.length >= 15) {
-            updateStreakStats(currentSeq, db);
-            const env = profileEnvironment(currentSeq);
+        if (seq.length >= CONFIG.MIN_SESSIONS) {
+            const env = profileEnvironment(seq);
             db.envProfile = env;
-            const pred = runUnbiasedEnsemble(currentSeq, currentSums, db, env);
-
-            const lastHistory = db.history[db.history.length - 1];
-            // Chỉ push nếu chưa có dự đoán cho phiên sid này
-            if (!lastHistory || lastHistory.phien < sid) {
+            const pred = runVipEnsemble(seq, db, env);
+            
+            if (!prev || prev.phien < sid) {
                 db.history.push({
                     phien: sid, xucXac: getB52Dice(latest), tong: getB52Sum(latest),
                     ketQua: getB52Result(latest), ketQuaLabel: label(getB52Result(latest)),
                     phienDuDoan: sid + 1, DU_DOAN_CODE: pred.code, DU_DOAN: label(pred.code),
-                    TI_LE: pred.tiLe, patternName: pred.label, algoDetails: pred.details,
-                    phase: pred.phase, envType: env.type, trangThai: 'ĐANG CHỜ'
+                    TI_LE: pred.tiLe, patternName: pred.label, details: pred.details,
+                    envType: env.type, trangThai: 'ĐANG CHỜ'
                 });
                 if (db.history.length > 500) db.history.shift();
                 saveDB(game, db);
@@ -514,118 +384,104 @@ async function processGame(game) {
 
     // MD5 & TAIXIU
     const list = await fetchApi(game === 'md5' ? API_MD5 : API_TX);
-    if (!list || !list.length) return;
+    if (!list.length) return;
     latest = list[list.length - 1];
-    currentSeq = list.map(getResult).filter(Boolean).reverse(); 
-    currentSums = list.map(getSum).filter(s => s >= 3 && s <= 18).reverse();
+    seq = list.map(getResult).filter(Boolean).reverse();
     
     const session = safeInt(latest.SessionId);
     if (db.lastSession === session) return;
     db.lastSession = session;
 
-    if (currentSeq.length < 15) { saveDB(game, db); return; }
+    if (seq.length >= CONFIG.MIN_SESSIONS) {
+        const env = profileEnvironment(seq);
+        db.envProfile = env;
+        const pred = runVipEnsemble(seq, db, env);
 
-    updateStreakStats(currentSeq, db);
-    const env = profileEnvironment(currentSeq);
-    db.envProfile = env;
-    const pred = runUnbiasedEnsemble(currentSeq, currentSums, db, env);
-
-    const prev = db.history[db.history.length - 1];
-    if (prev && prev.DU_DOAN_CODE && prev.trangThai === 'ĐANG CHỜ' && prev.phien < session) {
-        const actual = getResult(latest);
-        prev.trangThai = prev.DU_DOAN_CODE === actual ? 'ĐÚNG' : 'SAI';
-        if (prev.algoDetails) {
-            for (const algo of prev.algoDetails) {
-                if (!db.patternPerformance[algo.algo]) db.patternPerformance[algo.algo] = { win: 0, lose: 0, w: 1.0 };
-                if (algo.code === actual) db.patternPerformance[algo.algo].win++;
-                else db.patternPerformance[algo.algo].lose++;
-                const pp = db.patternPerformance[algo.algo];
-                if (pp.win + pp.lose >= 10) pp.w = clamp(0.5 + ((pp.win / (pp.win + pp.lose)) - 0.5) * 2, 0.5, 1.5);
-            }
+        const prev = db.history[db.history.length - 1];
+        if (prev && prev.trangThai === 'ĐANG CHỜ' && prev.phien < session) {
+            prev.trangThai = prev.DU_DOAN_CODE === getResult(latest) ? 'ĐÚNG' : 'SAI';
         }
+
+        db.history.push({
+            phien: session, xucXac: getDice(latest), tong: getSum(latest),
+            ketQua: getResult(latest), ketQuaLabel: label(getResult(latest)),
+            phienDuDoan: session + 1, DU_DOAN_CODE: pred.code, DU_DOAN: label(pred.code),
+            TI_LE: pred.tiLe, patternName: pred.label, details: pred.details,
+            envType: env.type, trangThai: 'ĐANG CHỜ'
+        });
+        if (db.history.length > 500) db.history.shift();
+        saveDB(game, db);
     }
-
-    db.history.push({
-        phien: session, xucXac: getDice(latest), tong: getSum(latest),
-        ketQua: getResult(latest), ketQuaLabel: label(getResult(latest)),
-        phienDuDoan: session + 1, DU_DOAN_CODE: pred.code, DU_DOAN: label(pred.code),
-        TI_LE: pred.tiLe, patternName: pred.label, algoDetails: pred.details,
-        phase: pred.phase, envType: env.type, trangThai: 'ĐANG CHỜ'
-    });
-
-    if (db.history.length > 500) db.history.shift();
-    saveDB(game, db);
 }
 
-setInterval(() => { 
-    processGame('md5'); 
-    processGame('taixiu'); 
-    processGame('b52'); 
-}, TICK_MS);
+// Chạy vòng lặp
+setInterval(() => { processGame('md5'); processGame('taixiu'); processGame('b52'); }, TICK_MS);
 
 // ============================================================
-// 7. ROUTERS & API (FIX LỖI HIỂN THỊ NULL)
+// 7. API ROUTER
 // ============================================================
-function buildJsonResponse(game, db, env, pred) {
+function buildResponse(game, db) {
+    const latest = db.history[db.history.length - 1] || {};
+    const env = db.envProfile || { type: 'ĐANG TẢI', confidence: 0, efs: 0, purity: 0, entropy: 1, dominant: null, stats: { L: 0 } };
+    
+    // Nếu không có dự đoán trong lịch sử, báo đang chờ
+    const pred = latest.DU_DOAN_CODE ? {
+        code: latest.DU_DOAN_CODE,
+        label: latest.patternName,
+        tiLe: latest.TI_LE,
+        details: latest.details || []
+    } : null;
+
     const settled = db.history.filter(h => h.trangThai === 'ĐÚNG' || h.trangThai === 'SAI');
     const win = settled.filter(h => h.trangThai === 'ĐÚNG').length;
     const lose = settled.filter(h => h.trangThai === 'SAI').length;
-    const duDoanText = pred ? label(pred.code) : null;
-    const latestHist = db.history[db.history.length - 1] || {};
 
     return {
         status: "success",
         data: {
-            phienHienTai: latestHist.phien || "0",
-            phienDuDoan: latestHist.phienDuDoan || "0",
-            duDoan: duDoanText, 
+            phienHienTai: latest.phien || "0",
+            phienDuDoan: latest.phienDuDoan || "0",
+            duDoan: pred ? label(pred.code) : "ĐANG CHỜ...",
             tiLe: pred ? pred.tiLe : "—",
-            // Sửa lại câu thông báo cho chuẩn xác
-            liDo: pred ? `⭐ ${pred.label} → ${duDoanText} (${pred.tiLe})` : `⏳ Hệ thống đang đồng bộ dữ liệu...`,
-            xucXac: latestHist.xucXac || [],
-            tongDiem: latestHist.tong || 0,
+            liDo: pred ? `⭐ ${pred.label} → ${label(pred.code)} (${pred.tiLe})` : `⏳ Cần thêm ${CONFIG.MIN_SESSIONS - (db.rawHistory.length || 0)} phiên...`,
+            xucXac: latest.xucXac || [],
+            tongDiem: latest.tong || 0,
             moiTruong: {
-                loai: env.type || "ĐANG TẢI",
+                loai: env.type,
                 doTinCay: (env.confidence || 0).toFixed(2),
                 efs: (env.efs || 0) + "%",
-                doTinhKhiet: ((env.purity || 0)*100).toFixed(1) + "%",
-                doNhieu: ((env.entropy || 1)*100).toFixed(1) + "%",
+                doTinhKhiet: ((env.purity || 0) * 100).toFixed(1) + "%",
+                doNhieu: ((env.entropy || 1) * 100).toFixed(1) + "%",
                 nghieng: env.dominant ? label(env.dominant) : "CÂN BẰNG"
             },
             chiTietModel: {
                 pattern: pred ? pred.label : '—',
-                phase: pred ? pred.phase : 'WARMUP'
+                topAlgos: pred ? pred.details.map(d => `${d.name} (${label(d.code)})`).join(' | ') : '—'
             },
-            thongKe: { win, lose, winrate: settled.length ? ((win/settled.length)*100).toFixed(1)+'%' : '—', bankroll: (1000 + win*10 - lose*10) + '$' }
+            thongKe: {
+                win, lose,
+                winrate: settled.length ? ((win / settled.length) * 100).toFixed(1) + '%' : '—',
+                bankroll: (1000 + win * 10 - lose * 10) + '$'
+            }
         }
     };
 }
 
-app.get('/b52', async (req, res) => {
+app.get('/b52', (req, res) => {
     const db = readDB('b52');
-    // FIX: Lấy dữ liệu chuẩn từ DB
-    const seq = db.rawHistory.map(x => x.result).reverse();
-    const env = db.envProfile || profileEnvironment(seq);
-    const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, [], db, env) : null;
-    res.json(buildJsonResponse('b52', db, env, pred));
+    res.json(buildResponse('b52', db));
 });
 
-app.get('/taixiu', async (req, res) => {
+app.get('/taixiu', (req, res) => {
     const db = readDB('taixiu');
-    const env = db.envProfile || { type: 'CHƯA CÓ', confidence: 0, efs: 0, purity: 0, entropy: 1, dominant: null, stats: {L:0} };
-    const seq = (db.rawHistory || []).map(x => x.result).reverse();
-    const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, [], db, env) : null;
-    res.json(buildJsonResponse('taixiu', db, env, pred));
+    res.json(buildResponse('taixiu', db));
 });
 
-app.get('/md5', async (req, res) => {
+app.get('/md5', (req, res) => {
     const db = readDB('md5');
-    const env = db.envProfile || { type: 'CHƯA CÓ', confidence: 0, efs: 0, purity: 0, entropy: 1, dominant: null, stats: {L:0} };
-    const seq = (db.rawHistory || []).map(x => x.result).reverse();
-    const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, [], db, env) : null;
-    res.json(buildJsonResponse('md5', db, env, pred));
+    res.json(buildResponse('md5', db));
 });
 
-app.get('/', (req, res) => res.redirect('/ui/b52'));
+app.get('/', (req, res) => res.redirect('/b52'));
 
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 V53 ULTIMATE VIP running on port ${PORT}`));
