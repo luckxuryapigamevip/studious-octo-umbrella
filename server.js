@@ -1,6 +1,6 @@
 'use strict';
 // ============================================================
-// SICBO AI V49 ULTIMATE - ALL MODELS + B52 + WARMUP + ENV
+// SICBO AI V50 ULTIMATE - ALL 1000+ LINES ALGORITHMS + B52
 // ============================================================
 const express = require('express');
 const axios = require('axios');
@@ -20,7 +20,7 @@ app.use((req, res, next) => {
 app.use(express.json());
 
 // ============================================================
-// 1. CẤU HÌNH API
+// 1. CẤU HÌNH API & DATABASE
 // ============================================================
 const API_MD5 = 'https://taixiumd5.maksh3979madfw.com/api/md5luckydice/GetSoiCau';
 const API_TX  = 'https://taixiu.maksh3979madfw.com/api/luckydice/GetSoiCau';
@@ -50,7 +50,7 @@ const DEFAULT_PATTERN_WEIGHTS = {
 if (!fs.existsSync(DB_DIR)) { try { fs.mkdirSync(DB_DIR, { recursive: true }); } catch (e) {} }
 
 // ============================================================
-// 2. UTILS & DATABASE
+// 2. HELPERS & DATA NORMALIZE
 // ============================================================
 function safeInt(x, def = 0) { const n = parseInt(x, 10); return Number.isFinite(n) ? n : def; }
 function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
@@ -62,42 +62,29 @@ function entropyBits(arr) {
     const f = {};
     for (const x of arr) f[x] = (f[x] || 0) + 1;
     let h = 0;
-    for (const k in f) {
-        const p = f[k] / arr.length;
-        if (p > 0) h -= p * Math.log2(p);
-    }
+    for (const k in f) { const p = f[k] / arr.length; if (p > 0) h -= p * Math.log2(p); }
     return h;
 }
 
-function dbPath(g) { return path.join(DB_DIR, `db_v49_${g}.json`); }
+function dbPath(g) { return path.join(DB_DIR, `db_v50_${g}.json`); }
 function readDB(g) {
     const p = dbPath(g);
     try {
         if (fs.existsSync(p)) {
             const db = JSON.parse(fs.readFileSync(p, 'utf8'));
             if (!db.weights) db.weights = {};
-            if (!db.patternStats) db.patternStats = {};
             if (!db.streakStats) db.streakStats = { T: {}, X: {} };
             return db;
         }
     } catch (e) {}
-    return { history: [], lastSession: null, weights: {}, patternStats: {}, streakStats: { T: {}, X: {} }, envProfile: null };
+    return { history: [], lastSession: null, weights: {}, streakStats: { T: {}, X: {} }, envProfile: null };
 }
-function saveDB(g, db) {
-    try { fs.writeFileSync(dbPath(g), JSON.stringify(db, null, 2)); } catch (e) {}
-}
+function saveDB(g, db) { try { fs.writeFileSync(dbPath(g), JSON.stringify(db, null, 2)); } catch (e) {} }
 
 function getDice(it) { return [safeInt(it?.FirstDice), safeInt(it?.SecondDice), safeInt(it?.ThirdDice)]; }
-function getSum(it) {
-    const s = getDice(it).reduce((a, b) => a + b, 0);
-    return (s >= 3 && s <= 18) ? s : safeInt(it?.DiceSum);
-}
-function getResult(it) {
-    const s = getSum(it);
-    return (s >= 3 && s <= 18) ? (s >= 11 ? 'T' : 'X') : null;
-}
+function getSum(it) { const s = getDice(it).reduce((a, b) => a + b, 0); return (s >= 3 && s <= 18) ? s : safeInt(it?.DiceSum); }
+function getResult(it) { const s = getSum(it); return (s >= 3 && s <= 18) ? (s >= 11 ? 'T' : 'X') : null; }
 
-// B52 Helpers
 function getB52Dice(it) { return [safeInt(it?.d1), safeInt(it?.d2), safeInt(it?.d3)]; }
 function getB52Sum(it) { return getB52Dice(it).reduce((a, b) => a + b, 0); }
 function getB52Result(it) {
@@ -119,7 +106,6 @@ function profileEnvironment(seq) {
     const xCount = L - tCount;
     const balance = Math.abs(tCount - xCount) / L;
     const entropy = entropyBits(seq);
-    
     let streaks = [], cur = seq[0], len = 1;
     for (let i = 1; i < L; i++) {
         if (seq[i] === cur) len++;
@@ -128,7 +114,6 @@ function profileEnvironment(seq) {
     streaks.push(len);
     const maxStreak = Math.max(...streaks);
     const streakRatio = streaks.filter(s => s >= 3).length / streaks.length;
-    
     const rec20 = seq.slice(-Math.min(20, L));
     let flips20 = 0;
     for (let i = 1; i < rec20.length; i++) if (rec20[i] !== rec20[i-1]) flips20++;
@@ -136,7 +121,6 @@ function profileEnvironment(seq) {
 
     let type = 'HỖN_HỢP', confidence = 0.5;
     const purity = 1 - entropy;
-    
     if (entropy > 0.90) { type = 'NHIỄU'; confidence = clamp((entropy - 0.90) * 10, 0, 1); }
     else if (entropy < 0.50 && (streakRatio > 0.3 || maxStreak >= 4)) { type = 'BỆT'; confidence = clamp((0.5 - entropy) * 2, 0.5, 1); }
     else if (zigzagRatio > 0.75 && entropy > 0.7) { type = 'ZIGZAG'; confidence = clamp((zigzagRatio - 0.75) * 4, 0.5, 1); }
@@ -158,138 +142,292 @@ function profileEnvironment(seq) {
     } else {
         available.push(...Object.keys(DEFAULT_PATTERN_WEIGHTS));
     }
-
     return { type, confidence, efs: Math.round(efs*10)/10, purity, entropy, dominant, availablePatterns: available, disabledPatterns: disabled, stats: { L, tCount, xCount, maxStreak, zigzagRatio } };
 }
 
 // ============================================================
-// 4. ALL THUẬT TOÁN CẦU (TÍCH HỢP TỪ BẢN V11)
+// 4. SIÊU THUẬT TOÁN (TÍCH HỢP TỪ BẢN V11 1K DÒNG)
 // ============================================================
-function generateAllPatterns() {
-    const A = [];
-    // 1. BỆT
-    for (let minLen = 2; minLen <= 8; minLen++) {
-        A.push({ id: `streak_learn_${minLen}`, baseFamily: 'cau_bet', fn: (seq, sums, db) => {
-            const n = seq.length, last = seq[n - 1]; let len = 1;
-            for (let i = n - 2; i >= 0; i--) { if (seq[i] === last) len++; else break; }
-            if (len < minLen) return null;
-            const st = db.streakStats?.[last]?.[len];
-            if (!st || (st.cont + st.stop) < 2) return null;
-            const pCont = (st.cont + 1) / (st.cont + st.stop + 2);
-            if (pCont > 0.55) return { code: last, name: `BỆT-${len}-TIẾP`, conf: clamp(pCont, 0.6, 0.85) };
-            if (pCont < 0.45) return { code: flip(last), name: `BỆT-${len}-GÃY`, conf: clamp(1 - pCont, 0.6, 0.85) };
-            return null;
-        }});
+// Hàm lấy trọng số học online
+function getW(db, id) { return db.weights?.[id]?.w || 1.0; }
+
+// 1. Cầu Bệt
+function cauBet(results, db) {
+    if (results.length < 3) return null;
+    let streakType = results[0], streakLength = 1;
+    for (let i = 1; i < results.length; i++) {
+        if (results[i] === streakType) streakLength++; else break;
     }
-    // 2. ĐẢO 1-1
-    for (let win = 4; win <= 10; win++) {
-        A.push({ id: `bounce_${win}`, baseFamily: 'cau_dao_11', fn: (seq) => {
-            const n = seq.length; if (n < win + 1) return null;
-            let flips = 0;
-            for (let i = n - win; i < n; i++) if (seq[i] !== seq[i - 1]) flips++;
-            return flips === win ? { code: flip(seq[n - 1]), name: `ĐẢO-1-1-W${win}`, conf: 0.75 } : null;
-        }});
+    if (streakLength >= 3) {
+        let shouldBreak = streakLength >= 6;
+        return { prediction: shouldBreak ? flip(streakType) : streakType, confidence: (shouldBreak ? Math.min(12, streakLength * 2) : Math.min(15, streakLength * 3)) * getW(db, 'cau_bet'), name: `Cầu Bệt ${streakLength}`, code: 'cau_bet' };
     }
-    // 3. ZIGZAG
-    for (let p = 2; p <= 8; p++) {
-        A.push({ id: `zigzag_${p}`, baseFamily: p===2?'cau_22':(p===3?'cau_33':'cau_ziczac'), fn: (seq) => {
-            const n = seq.length; if (n < p * 2 + 2) return null;
-            for (let i = n - p * 2; i < n - p; i++) if (seq[i] !== seq[i + p]) return null;
-            return { code: seq[n - p], name: `ZIGZAG-${p}`, conf: 0.72 };
-        }});
-    }
-    // 4. MARKOV
-    for (let k = 2; k <= 10; k++) {
-        A.push({ id: `markov_${k}`, baseFamily: 'markov_chain', fn: (seq) => {
-            const n = seq.length; if (n < k + 6) return null;
-            const key = seq.slice(-k).join(''); let t = 0, x = 0;
-            for (let i = k; i < n; i++) if (seq.slice(i - k, i).join('') === key) { if (seq[i] === 'T') t++; else x++; }
-            const tot = t + x; if (tot < 3) return null;
-            const pT = (t + 1) / (tot + 2), pX = (x + 1) / (tot + 2);
-            if (Math.max(pT, pX) < 0.6) return null;
-            return { code: pT > pX ? 'T' : 'X', name: `MARKOV-${k}`, conf: Math.max(pT, pX) };
-        }});
-    }
-    // 5. N-GRAM
-    for (let len = 3; len <= 10; len++) {
-        A.push({ id: `ngram_${len}`, baseFamily: 'distribution', fn: (seq) => {
-            const n = seq.length; if (n < len + 5) return null;
-            const tail = seq.slice(-len).join(''); let t = 0, x = 0, occ = 0;
-            for (let i = 0; i + len < n; i++) {
-                if (seq.slice(i, i + len).join('') === tail) { occ++; if (seq[i + len] === 'T') t++; else x++; }
-            }
-            if (occ < 2) return null;
-            const pT = (t + 1) / (occ + 2), pX = (x + 1) / (occ + 2);
-            if (Math.max(pT, pX) < 0.65) return null;
-            return { code: pT > pX ? 'T' : 'X', name: `NGRAM-${len}`, conf: Math.max(pT, pX) };
-        }});
-    }
-    // 6. CHU KỲ
-    for (let p = 2; p <= 20; p++) {
-        A.push({ id: `cycle_${p}`, baseFamily: 'cau_chu_ky', fn: (seq) => {
-            const n = seq.length; if (n < p * 2 + 2) return null;
-            let m = 0, tot = 0;
-            for (let i = p; i < n; i++) { tot++; if (seq[i] === seq[i - p]) m++; }
-            const r = m / tot;
-            if (r >= 0.7) return { code: seq[n - p], name: `CHU-KỲ-${p}`, conf: clamp(r, 0.7, 0.9) };
-            return null;
-        }});
-    }
-    // 7. GAP & PULL
-    for (let w = 20; w <= 60; w += 10) {
-        A.push({ id: `pull_${w}`, baseFamily: 'resistance_support', fn: (seq) => {
-            const n = seq.length; if (n < w) return null;
-            const pT = seq.slice(-w).filter(x => x === 'T').length / w;
-            if (pT >= 0.65) return { code: 'X', name: `KÉO-CB-X`, conf: 0.6 };
-            if (pT <= 0.35) return { code: 'T', name: `KÉO-CB-T`, conf: 0.6 };
-            return null;
-        }});
-    }
-    // 8. FRACTAL
-    for (let sc = 3; sc <= 9; sc++) {
-        A.push({ id: `fractal_${sc}`, baseFamily: 'cau_tu_nhien', fn: (seq) => {
-            const n = seq.length; if (n < sc * 3) return null;
-            const last = seq.slice(-sc).join('');
-            let t = 0, x = 0, cnt = 0;
-            for (let i = 0; i + sc < n - sc; i++) {
-                if (seq.slice(i, i + sc).join('') === last) { if (seq[i + sc] === 'T') t++; else x++; cnt++; }
-            }
-            if (cnt < 2) return null;
-            const pT = (t + 0.5) / (cnt + 1), pX = (x + 0.5) / (cnt + 1);
-            if (Math.max(pT, pX) < 0.65) return null;
-            return { code: pT > pX ? 'T' : 'X', name: `FRACTAL-${sc}`, conf: Math.max(pT, pX) };
-        }});
-    }
-    // 9. GƯƠNG / PALINDROME
-    for (let half = 3; half <= 8; half++) {
-        A.push({ id: `mirror_${half}`, baseFamily: 'cau_doi', fn: (seq) => {
-            const n = seq.length; if (n < half * 2 + 2) return null;
-            const rec = seq.slice(-(half * 2));
-            if (rec.slice(0, half).map(flip).join('') === rec.slice(half).join(''))
-                return { code: flip(seq[n - 1]), name: `GƯƠNG-${half}`, conf: 0.7 };
-            return null;
-        }});
-    }
-    // 10. CUSUM
-    for (let w = 10; w <= 30; w += 10) {
-        A.push({ id: `cusum_${w}`, baseFamily: 'break_pattern', fn: (seq) => {
-            const n = seq.length; if (n < w) return null;
-            const rec = seq.slice(-w);
-            let sp = 0, sn = 0;
-            for (const x of rec) { const v = x === 'T' ? 1 : -1; sp = Math.max(0, sp + v); sn = Math.min(0, sn + v); }
-            if (sp >= 4) return { code: 'X', name: `CUSUM-DOWN`, conf: 0.66 };
-            if (sn <= -4) return { code: 'T', name: `CUSUM-UP`, conf: 0.66 };
-            return null;
-        }});
-    }
-    return A;
+    return null;
 }
 
-const ALL_ALGOS = generateAllPatterns();
-console.log(`✅ Đã nạp ${ALL_ALGOS.length} thuật toán / cầu mẫu.`);
+// 2. Cầu Đảo 1-1
+function cauDao11(results, db) {
+    if (results.length < 4) return null;
+    let alternatingLength = 1;
+    for (let i = 1; i < Math.min(results.length, 10); i++) {
+        if (results[i] !== results[i - 1]) alternatingLength++; else break;
+    }
+    if (alternatingLength >= 4) {
+        return { prediction: flip(results[0]), confidence: Math.min(14, alternatingLength * 2 + 4) * getW(db, 'cau_dao_11'), name: `Đảo 1-1 (${alternatingLength})`, code: 'cau_dao_11' };
+    }
+    return null;
+}
+
+// 3. Cầu 2-2
+function cau22(results, db) {
+    if (results.length < 6) return null;
+    let pairCount = 0, i = 0, pattern = [];
+    while (i < results.length - 1 && pairCount < 4) {
+        if (results[i] === results[i + 1]) { pattern.push(results[i]); pairCount++; i += 2; } else break;
+    }
+    if (pairCount >= 2) {
+        let isAlt = true;
+        for (let j = 1; j < pattern.length; j++) { if (pattern[j] === pattern[j - 1]) { isAlt = false; break; } }
+        if (isAlt) return { prediction: flip(pattern[pattern.length - 1]), confidence: Math.min(12, pairCount * 3 + 3) * getW(db, 'cau_22'), name: `Cầu 2-2 (${pairCount})`, code: 'cau_22' };
+    }
+    return null;
+}
+
+// 4. Cầu 3-3
+function cau33(results, db) {
+    if (results.length < 6) return null;
+    let tripleCount = 0, i = 0, pattern = [];
+    while (i < results.length - 2) {
+        if (results[i] === results[i + 1] && results[i + 1] === results[i + 2]) { pattern.push(results[i]); tripleCount++; i += 3; } else break;
+    }
+    if (tripleCount >= 1) {
+        const currentPos = results.length % 3;
+        let prediction = currentPos === 0 ? flip(pattern[pattern.length - 1]) : pattern[pattern.length - 1];
+        return { prediction, confidence: Math.min(13, tripleCount * 4 + 5) * getW(db, 'cau_33'), name: `Cầu 3-3 (${tripleCount})`, code: 'cau_33' };
+    }
+    return null;
+}
+
+// 5. Cầu 1-2-1
+function cau121(results, db) {
+    if (results.length < 4) return null;
+    const p = results.slice(0, 4);
+    if (p[0] !== p[1] && p[1] === p[2] && p[2] !== p[3] && p[0] === p[3]) {
+        return { prediction: p[0], confidence: 10 * getW(db, 'cau_121'), name: 'Cầu 1-2-1', code: 'cau_121' };
+    }
+    return null;
+}
+
+// 6. Cầu 1-2-3
+function cau123(results, db) {
+    if (results.length < 6) return null;
+    const first = results[5], nextTwo = results.slice(3, 5), lastThree = results.slice(0, 3);
+    if (nextTwo[0] === nextTwo[1] && nextTwo[0] !== first && lastThree.every(r => r === lastThree[0]) && lastThree[0] !== nextTwo[0]) {
+        return { prediction: first, confidence: 11 * getW(db, 'cau_123'), name: 'Cầu 1-2-3', code: 'cau_123' };
+    }
+    return null;
+}
+
+// 7. Cầu 3-2-1
+function cau321(results, db) {
+    if (results.length < 6) return null;
+    const f3 = results.slice(3, 6), n2 = results.slice(1, 3), l1 = results[0];
+    if (f3.every(r => r === f3[0]) && n2.every(r => r === n2[0]) && f3[0] !== n2[0] && l1 !== n2[0]) {
+        return { prediction: n2[0], confidence: 12 * getW(db, 'cau_321'), name: 'Cầu 3-2-1', code: 'cau_321' };
+    }
+    return null;
+}
+
+// 8. Cầu Nhảy Cóc
+function cauNhayCoc(results, db) {
+    if (results.length < 6) return null;
+    const skipPattern = [];
+    for (let i = 0; i < Math.min(results.length, 12); i += 2) skipPattern.push(results[i]);
+    if (skipPattern.length >= 3) {
+        if (skipPattern.slice(0, 3).every(r => r === skipPattern[0])) return { prediction: skipPattern[0], confidence: 8 * getW(db, 'cau_nhay_coc'), name: 'Nhảy Cóc', code: 'cau_nhay_coc' };
+        let alt = true;
+        for (let i = 1; i < skipPattern.length - 1; i++) { if (skipPattern[i] === skipPattern[i - 1]) { alt = false; break; } }
+        if (alt && skipPattern.length >= 3) return { prediction: flip(skipPattern[0]), confidence: 7 * getW(db, 'cau_nhay_coc'), name: 'Nhảy Cóc Đảo', code: 'cau_nhay_coc' };
+    }
+    return null;
+}
+
+// 9. Cầu Nhịp Nghiêng
+function cauNhipNghieng(results, db) {
+    if (results.length < 5) return null;
+    const last5 = results.slice(0, 5), tai5 = last5.filter(r => r === 'T').length;
+    if (tai5 >= 4) return { prediction: 'T', confidence: 9 * getW(db, 'cau_nhip_nghieng'), name: `Nghiêng 5 (${tai5}T)`, code: 'cau_nhip_nghieng' };
+    if (tai5 <= 1) return { prediction: 'X', confidence: 9 * getW(db, 'cau_nhip_nghieng'), name: `Nghiêng 5 (${5-tai5}X)`, code: 'cau_nhip_nghieng' };
+    if (results.length >= 7) {
+        const last7 = results.slice(0, 7), tai7 = last7.filter(r => r === 'T').length;
+        if (tai7 >= 5) return { prediction: 'T', confidence: 10 * getW(db, 'cau_nhip_nghieng'), name: `Nghiêng 7 (${tai7}T)`, code: 'cau_nhip_nghieng' };
+        if (tai7 <= 2) return { prediction: 'X', confidence: 10 * getW(db, 'cau_nhip_nghieng'), name: `Nghiêng 7 (${7-tai7}X)`, code: 'cau_nhip_nghieng' };
+    }
+    return null;
+}
+
+// 10. Cầu 3 Ván 1
+function cau3Van1(results, db) {
+    if (results.length < 4) return null;
+    const last4 = results.slice(0, 4), taiCount = last4.filter(r => r === 'T').length;
+    if (taiCount === 3 && last4[3] === 'X') return { prediction: 'T', confidence: 8 * getW(db, 'cau_3van1'), name: '3 Ván 1', code: 'cau_3van1' };
+    if (taiCount === 1 && last4[3] === 'T') return { prediction: 'X', confidence: 8 * getW(db, 'cau_3van1'), name: '3 Ván 1', code: 'cau_3van1' };
+    return null;
+}
+
+// 11. Cầu Bẻ
+function cauBeCau(results, db) {
+    if (results.length < 5) return null;
+    let len = 1;
+    for (let i = 1; i < results.length; i++) { if (results[i] === results[0]) len++; else break; }
+    if (len >= 4) return { prediction: flip(results[0]), confidence: Math.min(14, len * 2 + 4) * getW(db, 'cau_be_cau'), name: `Bẻ Cầu ${len}`, code: 'cau_be_cau' };
+    return null;
+}
+
+// 12. Cầu 4-4
+function cau44(results, db) {
+    if (results.length < 8) return null;
+    let qCount = 0, i = 0, pattern = [];
+    while (i < results.length - 3) {
+        if (results[i] === results[i+1] && results[i+1] === results[i+2] && results[i+2] === results[i+3]) { pattern.push(results[i]); qCount++; i += 4; } else break;
+    }
+    if (qCount >= 1) {
+        const curPos = results.length - (qCount * 4);
+        let pred = curPos >= 3 ? flip(pattern[pattern.length - 1]) : pattern[pattern.length - 1];
+        return { prediction: pred, confidence: Math.min(14, qCount * 4 + 6) * getW(db, 'cau_44'), name: `Cầu 4-4`, code: 'cau_44' };
+    }
+    return null;
+}
+
+// 13. Cầu 5-5
+function cau55(results, db) {
+    if (results.length < 10) return null;
+    let qCount = 0, i = 0, pattern = [];
+    while (i < results.length - 4) {
+        if (results[i] === results[i+1] && results[i+1] === results[i+2] && results[i+2] === results[i+3] && results[i+3] === results[i+4]) { pattern.push(results[i]); qCount++; i += 5; } else break;
+    }
+    if (qCount >= 1) {
+        const curPos = results.length - (qCount * 5);
+        let pred = curPos >= 4 ? flip(pattern[pattern.length - 1]) : pattern[pattern.length - 1];
+        return { prediction: pred, confidence: Math.min(15, qCount * 5 + 7) * getW(db, 'cau_55'), name: `Cầu 5-5`, code: 'cau_55' };
+    }
+    return null;
+}
+
+// 14. Cầu 2-1-2
+function cau212(results, db) {
+    if (results.length < 5) return null;
+    const p = results.slice(0, 5);
+    if (p[0] === p[1] && p[1] !== p[2] && p[2] === p[3] && p[3] !== p[4] && p[0] !== p[2]) {
+        return { prediction: flip(p[0]), confidence: 10 * getW(db, 'cau_212'), name: 'Cầu 2-1-2', code: 'cau_212' };
+    }
+    return null;
+}
+
+// 15. Cầu 1-2-2-1
+function cau1221(results, db) {
+    if (results.length < 6) return null;
+    const p = results.slice(0, 6);
+    if (p[0] !== p[1] && p[1] === p[2] && p[2] === p[3] && p[3] !== p[4] && p[4] === p[5] && p[0] !== p[1]) {
+        return { prediction: p[0], confidence: 11 * getW(db, 'cau_1221'), name: 'Cầu 1-2-2-1', code: 'cau_1221' };
+    }
+    return null;
+}
+
+// 16. Cầu 2-1-1-2
+function cau2112(results, db) {
+    if (results.length < 6) return null;
+    const p = results.slice(0, 6);
+    if (p[0] === p[1] && p[1] !== p[2] && p[2] === p[3] && p[3] !== p[4] && p[4] === p[5] && p[0] !== p[2]) {
+        return { prediction: p[0], confidence: 11 * getW(db, 'cau_2112'), name: 'Cầu 2-1-1-2', code: 'cau_2112' };
+    }
+    return null;
+}
+
+// 17. Cầu Gấp
+function cauGap(results, db) {
+    if (results.length < 6) return null;
+    for (let gap = 2; gap <= 3; gap++) {
+        let found = true, ref = results[0];
+        for (let i = 0; i < Math.min(results.length, 12); i += (gap + 1)) {
+            if (results[i] !== ref) { found = false; break; }
+        }
+        if (found) return { prediction: ref, confidence: 9 * getW(db, 'cau_gap'), name: `Cầu Gấp ${gap+1}`, code: 'cau_gap' };
+    }
+    return null;
+}
+
+// 18. Cầu Ziczac
+function cauZiczac(results, db) {
+    if (results.length < 8) return null;
+    let count = 0;
+    for (let i = 0; i < results.length - 2; i++) {
+        if (results[i] !== results[i+1] && results[i+1] !== results[i+2] && results[i] === results[i+2]) count++; else break;
+    }
+    if (count >= 3) return { prediction: flip(results[0]), confidence: Math.min(13, count * 2 + 5) * getW(db, 'cau_ziczac'), name: `Ziczac (${count})`, code: 'cau_ziczac' };
+    return null;
+}
+
+// 19. Cầu Đôi
+function cauDoi(results, db) {
+    if (results.length < 4) return null;
+    let pairChanges = 0, i = 0;
+    while (i < results.length - 1) { if (results[i] === results[i+1]) { pairChanges++; i += 2; } else break; }
+    if (pairChanges >= 2) {
+        const isAlt = results[0] !== results[2];
+        return { prediction: isAlt ? flip(results[0]) : results[0], confidence: Math.min(12, pairChanges * 3 + 4) * getW(db, 'cau_doi'), name: `Cầu Đôi (${pairChanges})`, code: 'cau_doi' };
+    }
+    return null;
+}
+
+// 20. Cầu Rồng
+function cauRong(results, db) {
+    if (results.length < 6) return null;
+    let len = 1;
+    for (let i = 1; i < results.length; i++) { if (results[i] === results[0]) len++; else break; }
+    if (len >= 6) return { prediction: flip(results[0]), confidence: Math.min(16, len + 8) * getW(db, 'cau_rong'), name: `Rồng ${len}`, code: 'cau_rong' };
+    return null;
+}
+
+// 21. Smart Bet
+function smartBet(results, db) {
+    if (results.length < 10) return null;
+    const l5 = results.slice(0, 5), p5 = results.slice(5, 10);
+    const t5 = l5.filter(r => r === 'T').length, tp5 = p5.filter(r => r === 'T').length;
+    if ((t5 >= 4 && tp5 <= 1) || (t5 <= 1 && tp5 >= 4)) {
+        const dom = t5 >= 4 ? 'T' : 'X';
+        return { prediction: flip(dom), confidence: 13 * getW(db, 'smart_bet'), name: 'Đảo Xu Hướng', code: 'smart_bet' };
+    }
+    const t10 = results.slice(0, 10).filter(r => r === 'T').length;
+    if (t10 >= 8 || t10 <= 2) {
+        const dom = t10 >= 8 ? 'T' : 'X';
+        return { prediction: flip(dom), confidence: 12 * getW(db, 'smart_bet'), name: 'Xu Hướng Cực', code: 'smart_bet' };
+    }
+    return null;
+}
+
+// 22. Chu Kỳ
+function cauChuKy(results, db) {
+    if (results.length < 12) return null;
+    for (let len = 2; len <= 6; len++) {
+        let ok = true, pattern = results.slice(0, len);
+        for (let i = len; i < Math.min(len * 3, results.length); i++) {
+            if (results[i] !== pattern[i % len]) { ok = false; break; }
+        }
+        if (ok) return { prediction: pattern[results.length % len], confidence: 9 * getW(db, 'cau_chu_ky'), name: `Chu Kỳ ${len}`, code: 'cau_chu_ky' };
+    }
+    return null;
+}
+
+// 23. Cầu Tự Nhiên (Fallback)
+function cauTuNhien(results, db) {
+    const l10 = results.slice(0, Math.min(10, results.length));
+    const t = l10.filter(r => r === 'T').length;
+    return { prediction: t > l10.length/2 ? 'T' : 'X', confidence: 5 * getW(db, 'cau_tu_nhien'), name: 'Cầu Tự Nhiên', code: 'cau_tu_nhien' };
+}
 
 // ============================================================
-// 5. TỔNG HỢP KHÔNG THIÊN VỊ
+// 5. TỔNG HỢP KHÔNG THIÊN VỊ (GỌI TẤT CẢ 23+ CẦU TRÊN)
 // ============================================================
 function runUnbiasedEnsemble(seq, sums, db, env) {
     const disabled = new Set(env.disabledPatterns);
@@ -298,54 +436,57 @@ function runUnbiasedEnsemble(seq, sums, db, env) {
     const last = seq[seq.length - 1];
     let currentStreak = 1;
     for (let i = seq.length - 2; i >= 0; i--) {
-        if (seq[i] === last) currentStreak++;
-        else break;
+        if (seq[i] === last) currentStreak++; else break;
     }
 
-    for (const algo of ALL_ALGOS) {
-        if (disabled.has(algo.baseFamily)) continue;
-        let res = null; try { res = algo.fn(seq, sums, db); } catch (e) {}
-        if (!res || !res.code) continue;
+    // Danh sách 23+ cầu
+    const funcs = [
+        cauBet, cauDao11, cau22, cau33, cau121, cau123, cau321, cauNhayCoc, cauNhipNghieng,
+        cau3Van1, cauBeCau, cau44, cau55, cau212, cau1221, cau2112, cauGap, cauZiczac,
+        cauDoi, cauRong, smartBet, cauChuKy
+    ];
 
-        const baseW = DEFAULT_PATTERN_WEIGHTS[algo.baseFamily] || 1.0;
-        const learnedW = db.weights?.[algo.id]?.w || 1.0;
+    for (const fn of funcs) {
+        let res = null; try { res = fn(seq, db); } catch (e) {}
+        if (!res || disabled.has(res.code)) continue;
+
+        const baseW = DEFAULT_PATTERN_WEIGHTS[res.code] || 1.0;
+        const learnedW = db.weights?.[res.code]?.w || 1.0;
         
-        let streakPenalty = 1.0;
-        if (currentStreak >= 3) {
-            if (res.code === last) streakPenalty = 0.5;
-            else streakPenalty = 1.5;
-        }
+        let penalty = 1.0;
+        if (currentStreak >= 3) { if (res.prediction === last) penalty = 0.5; else penalty = 1.5; }
 
-        const vote = res.conf * baseW * learnedW * streakPenalty;
+        const vote = (res.confidence / 100) * baseW * learnedW * penalty;
 
-        if (res.code === 'T') votesT.push({ vote, name: res.name });
+        if (res.prediction === 'T') votesT.push({ vote, name: res.name });
         else votesX.push({ vote, name: res.name });
-        details.push({ algo: algo.id, family: algo.baseFamily, code: res.code, name: res.name });
+        details.push({ algo: res.code, family: res.code, code: res.prediction, name: res.name });
+    }
+
+    // Fallback nếu không có cầu nào khớp
+    if (votesT.length === 0 && votesX.length === 0) {
+        const fallback = cauTuNhien(seq, db);
+        if (fallback.prediction === 'T') votesT.push({ vote: 0.05, name: fallback.name });
+        else votesX.push({ vote: 0.05, name: fallback.name });
+        details.push({ algo: 'cau_tu_nhien', family: 'cau_tu_nhien', code: fallback.prediction, name: fallback.name });
     }
 
     const cT = votesT.length, cX = votesX.length;
     const sT = votesT.reduce((a, b) => a + b.vote, 0);
     const sX = votesX.reduce((a, b) => a + b.vote, 0);
-
     const scoreT = cT > 0 ? sT / cT : 0;
     const scoreX = cX > 0 ? sX / cX : 0;
 
     let winner, confidence, patternName, method;
 
-    if (cT + cX === 0) {
-        winner = flip(last); confidence = 0.51; patternName = 'BẺ-CẦU-NHIỄU'; method = 'anti_noise';
-    } else if (Math.abs(scoreT - scoreX) < 0.03) {
+    if (Math.abs(scoreT - scoreX) < 0.03) {
         winner = flip(last); confidence = 0.515; patternName = 'HÒA-BẺ-CẦU'; method = 'tie_break';
     } else {
         winner = scoreT > scoreX ? 'T' : 'X';
         const maxS = Math.max(scoreT, scoreX);
         const diff = Math.abs(scoreT - scoreX) / maxS;
-        
         if (diff < 0.05) {
-            winner = flip(last);
-            confidence = 0.52;
-            patternName = 'BẺ-CẦU-DO-NHIỄU';
-            method = 'low_diff_break';
+            winner = flip(last); confidence = 0.52; patternName = 'BẺ-CẦU-NHIỄU'; method = 'low_diff_break';
         } else {
             confidence = clamp(0.5 + diff * 0.5, 0.5, 0.85);
             const top = (winner === 'T' ? votesT : votesX).sort((a,b)=>b.vote-a.vote)[0];
@@ -355,16 +496,9 @@ function runUnbiasedEnsemble(seq, sums, db, env) {
     }
 
     const efs = env.efs;
-    if (env.stats.L < CONFIG.WARMUP.MIN_SESSIONS) {
-        confidence = clamp(0.51 + (confidence - 0.5) * 0.5, 0.51, 0.55);
-    } else if (efs < CONFIG.WARMUP.EFS_TARGET) {
-        const ratio = efs / CONFIG.WARMUP.EFS_TARGET;
-        const target = 0.51 + 0.08 * ratio;
-        confidence = clamp(Math.min(confidence, target), 0.51, 0.59);
-    } else {
-        const boost = ((efs - CONFIG.WARMUP.EFS_TARGET) / 20) * 0.1;
-        confidence = clamp(confidence * (1 + boost), 0.51, 0.85);
-    }
+    if (env.stats.L < CONFIG.WARMUP.MIN_SESSIONS) confidence = clamp(0.51 + (confidence - 0.5) * 0.5, 0.51, 0.55);
+    else if (efs < CONFIG.WARMUP.EFS_TARGET) confidence = clamp(Math.min(confidence, 0.51 + (efs / CONFIG.WARMUP.EFS_TARGET) * 0.08), 0.51, 0.59);
+    else confidence = clamp(confidence * (1 + ((efs - 80) / 20) * 0.1), 0.51, 0.85);
 
     return {
         code: winner, label: patternName, tiLe: (confidence*100).toFixed(1)+'%', confidence, method,
@@ -433,11 +567,7 @@ async function processGame(game) {
         currentResult = getResult(latest);
     }
 
-    if (seq.length < 15) {
-        db.lastSession = session;
-        saveDB(game, db);
-        return;
-    }
+    if (seq.length < 15) { db.lastSession = session; saveDB(game, db); return; }
 
     updateStreakStats(seq, db);
     const env = profileEnvironment(seq);
@@ -461,15 +591,9 @@ async function processGame(game) {
         tong: game === 'b52' ? getB52Sum(latest) : getSum(latest),
         ketQua: currentResult, ketQuaLabel: label(currentResult),
         phienDuDoan: session + 1,
-        DU_DOAN_CODE: pred.code, 
-        DU_DOAN: label(pred.code), 
-        TI_LE: pred.tiLe,
-        patternName: pred.label,
-        algoDetails: pred.details,
-        method: pred.method,
-        phase: pred.phase,
-        envType: env.type,
-        trangThai: 'ĐANG CHỜ'
+        DU_DOAN_CODE: pred.code, DU_DOAN: label(pred.code), 
+        TI_LE: pred.tiLe, patternName: pred.label, algoDetails: pred.details,
+        method: pred.method, phase: pred.phase, envType: env.type, trangThai: 'ĐANG CHỜ'
     });
 
     if (db.history.length > 500) db.history.shift();
@@ -477,11 +601,7 @@ async function processGame(game) {
     saveDB(game, db);
 }
 
-setInterval(() => { 
-    processGame('md5'); 
-    processGame('taixiu'); 
-    processGame('b52'); 
-}, TICK_MS);
+setInterval(() => { processGame('md5'); processGame('taixiu'); processGame('b52'); }, TICK_MS);
 
 // ============================================================
 // 7. ROUTERS
@@ -490,43 +610,26 @@ function buildJsonResponse(game, list, db, env, pred) {
     const settled = db.history.filter(h => h.trangThai === 'ĐÚNG' || h.trangThai === 'SAI');
     const win = settled.filter(h => h.trangThai === 'ĐÚNG').length;
     const lose = settled.filter(h => h.trangThai === 'SAI').length;
-
     const duDoanText = pred ? label(pred.code) : null;
     const latest = list[list.length - 1];
     
-    let phienHienTai, xucXac, tongDiem;
-    if (game === 'b52') {
-        phienHienTai = String(safeInt(latest.sid));
-        xucXac = getB52Dice(latest);
-        tongDiem = getB52Sum(latest);
-    } else {
-        phienHienTai = String(safeInt(latest.SessionId));
-        xucXac = getDice(latest);
-        tongDiem = getSum(latest);
-    }
+    let phienHienTai = game === 'b52' ? String(safeInt(latest.sid)) : String(safeInt(latest.SessionId));
+    let xucXac = game === 'b52' ? getB52Dice(latest) : getDice(latest);
+    let tongDiem = game === 'b52' ? getB52Sum(latest) : getSum(latest);
 
     return {
         status: "success",
         data: {
-            phienHienTai: phienHienTai,
-            phienDuDoan: String(safeInt(phienHienTai) + 1),
-            duDoan: duDoanText, 
-            tiLe: pred ? pred.tiLe : "—",
+            phienHienTai, phienDuDoan: String(safeInt(phienHienTai) + 1),
+            duDoan: duDoanText, tiLe: pred ? pred.tiLe : "—",
             liDo: pred ? `⭐ ${pred.label} → ${duDoanText} (${pred.tiLe})` : `⏳ Đang quét ${env.stats.L}/15 phiên...`,
-            xucXac: xucXac,
-            tongDiem: tongDiem,
+            xucXac, tongDiem,
             moiTruong: {
-                loai: env.type,
-                doTinCay: env.confidence.toFixed(2),
-                efs: env.efs + "%",
-                doTinhKhiet: (env.purity*100).toFixed(1) + "%",
-                doNhieu: (env.entropy*100).toFixed(1) + "%",
+                loai: env.type, doTinCay: env.confidence.toFixed(2), efs: env.efs + "%",
+                doTinhKhiet: (env.purity*100).toFixed(1) + "%", doNhieu: (env.entropy*100).toFixed(1) + "%",
                 nghieng: env.dominant ? label(env.dominant) : "CÂN BẰNG"
             },
-            chiTietModel: {
-                pattern: pred ? pred.label : '—',
-                phase: pred ? pred.phase : 'WARMUP'
-            },
+            chiTietModel: { pattern: pred ? pred.label : '—', phase: pred ? pred.phase : 'WARMUP' },
             thongKe: { win, lose, winrate: settled.length ? ((win/settled.length)*100).toFixed(1)+'%' : '—', bankroll: (1000 + win*10 - lose*10) + '$' }
         }
     };
@@ -535,35 +638,29 @@ function buildJsonResponse(game, list, db, env, pred) {
 app.get('/taixiu', async (req, res) => {
     const list = await fetchApi(API_TX); const db = readDB('taixiu');
     if (!list || !list.length) return res.status(500).json({ status: "error" });
-    const seq = list.map(getResult).filter(Boolean);
-    const sums = list.map(getSum).filter(s => s >= 3 && s <= 18);
-    const env = profileEnvironment(seq);
-    const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, sums, db, env) : null;
+    const seq = list.map(getResult).filter(Boolean); const sums = list.map(getSum).filter(s => s >= 3 && s <= 18);
+    const env = profileEnvironment(seq); const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, sums, db, env) : null;
     res.json(buildJsonResponse('taixiu', list, db, env, pred));
 });
 
 app.get('/md5', async (req, res) => {
     const list = await fetchApi(API_MD5); const db = readDB('md5');
     if (!list || !list.length) return res.status(500).json({ status: "error" });
-    const seq = list.map(getResult).filter(Boolean);
-    const sums = list.map(getSum).filter(s => s >= 3 && s <= 18);
-    const env = profileEnvironment(seq);
-    const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, sums, db, env) : null;
+    const seq = list.map(getResult).filter(Boolean); const sums = list.map(getSum).filter(s => s >= 3 && s <= 18);
+    const env = profileEnvironment(seq); const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, sums, db, env) : null;
     res.json(buildJsonResponse('md5', list, db, env, pred));
 });
 
 app.get('/b52', async (req, res) => {
     const list = await fetchB52(); const db = readDB('b52');
-    if (!list || !list.length) return res.status(500).json({ status: "error", message: "Không lấy được dữ liệu B52" });
-    const seq = list.map(getB52Result).filter(Boolean);
-    const sums = list.map(getB52Sum).filter(s => s >= 3 && s <= 18);
-    const env = profileEnvironment(seq);
-    const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, sums, db, env) : null;
+    if (!list || !list.length) return res.status(500).json({ status: "error" });
+    const seq = list.map(getB52Result).filter(Boolean); const sums = list.map(getB52Sum).filter(s => s >= 3 && s <= 18);
+    const env = profileEnvironment(seq); const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, sums, db, env) : null;
     res.json(buildJsonResponse('b52', list, db, env, pred));
 });
 
 // ============================================================
-// 8. ROUTE UI
+// 8. UI
 // ============================================================
 app.get('/ui/:game', (req, res) => {
     const game = req.params.game;
@@ -575,73 +672,54 @@ app.get('/ui/:game', (req, res) => {
     const acc = settled.length ? (correct / settled.length * 100).toFixed(1) : '0.0';
     const env = db.envProfile || { type: 'CHƯA CÓ', confidence: 0, efs: 0, purity: 0, entropy: 1, dominant: null };
 
-    res.send(`<!DOCTYPE html>
-<html lang="vi"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>V49 - ${game.toUpperCase()}</title>
+    res.send(`<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>V50 - ${game.toUpperCase()}</title>
 <style>
-*{box-sizing:border-box}
-body{font-family:-apple-system,sans-serif;background:#0a0e27;color:#e6eef6;padding:12px;margin:0;}
-.header{background:linear-gradient(135deg,#1e3a8a,#3b82f6);padding:16px;border-radius:14px;margin-bottom:14px;}
+*{box-sizing:border-box}body{font-family:-apple-system,sans-serif;background:#0a0e27;color:#e6eef6;padding:12px;margin:0}
+.header{background:linear-gradient(135deg,#1e3a8a,#3b82f6);padding:16px;border-radius:14px;margin-bottom:14px}
 h1{color:#fff;font-size:20px;margin:0 0 8px;font-weight:800;text-align:center}
 .env-box{background:rgba(0,0,0,.3);padding:10px;border-radius:10px;font-size:13px;margin-bottom:8px}
 .env-row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.1)}
-.env-row:last-child{border:none}
-.env-val{color:#fbbf24;font-weight:700}
+.env-row:last-child{border:none}.env-val{color:#fbbf24;font-weight:700}
 .efs-bar{height:6px;background:#1e293b;border-radius:3px;overflow:hidden;margin-top:6px}
 .efs-fill{height:100%;background:linear-gradient(90deg,#ef4444,#fbbf24,#22c55e);transition:width .3s}
-.table-wrap{background:#0f172a;border-radius:12px;overflow-x:auto;border:1px solid #334155;}
+.table-wrap{background:#0f172a;border-radius:12px;overflow-x:auto;border:1px solid #334155}
 table{width:100%;border-collapse:collapse;font-size:11px}
-th{background:#1e40af;color:#fff;padding:8px 4px;font-size:10px;text-transform:uppercase;}
-td{padding:8px 3px;text-align:center;border-bottom:1px solid #1e293b;}
+th{background:#1e40af;color:#fff;padding:8px 4px;font-size:10px;text-transform:uppercase}
+td{padding:8px 3px;text-align:center;border-bottom:1px solid #1e293b}
 .tai{color:#22c55e;font-weight:700}.xiu{color:#ef4444;font-weight:700}
 .dung{color:#22c55e;font-weight:700}.sai{color:#ef4444;font-weight:700}.cho{color:#94a3b8;font-weight:600}
 .dice{color:#fbbf24;font-weight:700;line-height:1.2;font-size:10px}
 .sum{display:inline-block;padding:2px 5px;border-radius:4px;background:#334155;color:#fbbf24;font-weight:800;font-size:11px}
 .session{font-family:monospace;font-size:10px;color:#64748b}
 .ti-le{font-size:11px;color:#cbd5e1;font-weight:600}
-.phase-warm{color:#fbbf24;background:#78350f;padding:2px 5px;border-radius:4px;}
-.phase-ready{color:#22c55e;background:#14532d;padding:2px 5px;border-radius:4px;}
+.phase-warm{color:#fbbf24;background:#78350f;padding:2px 5px;border-radius:4px}
+.phase-ready{color:#22c55e;background:#14532d;padding:2px 5px;border-radius:4px}
 .env-tag{display:inline-block;padding:2px 5px;border-radius:4px;font-size:9px;font-weight:700;background:#1e40af;color:#fff}
-</style>
-<script>setTimeout(()=>location.reload(), 5000);</script>
-</head><body>
-<div class="header">
-  <h1>V49 · ${game.toUpperCase()}</h1>
-  <div class="env-box">
-    <div class="env-row"><span>🌍 Môi trường</span><span class="env-val">${env.type}</span></div>
-    <div class="env-row"><span>🎯 Độ tin cậy</span><span class="env-val">${(env.confidence*100).toFixed(1)}%</span></div>
-    <div class="env-row"><span>📊 EFS</span><span class="env-val">${env.efs}%</span></div>
-    <div class="env-row"><span>💎 Tinh khiết</span><span class="env-val">${(env.purity*100).toFixed(1)}%</span></div>
-    <div class="env-row"><span>🌫️ Nhiễu</span><span class="env-val">${(env.entropy*100).toFixed(1)}%</span></div>
-    <div class="env-row"><span>⚖️ Nghiêng</span><span class="env-val">${env.dominant ? label(env.dominant) : 'CÂN BẰNG'}</span></div>
-    <div class="efs-bar"><div class="efs-fill" style="width:${env.efs}%"></div></div>
-  </div>
-  <div style="text-align:center;font-size:13px;color:#fff">Chính xác: <strong>${acc}%</strong> (${settled.length} phiên)</div>
-</div>
-<div class="table-wrap"><table>
-<thead><tr><th>PHIÊN</th><th>XX</th><th>TỔNG</th><th>KQ</th><th>DỰ ĐOÁN</th><th>TỈ LỆ</th><th>MÔI TRƯỜNG</th><th>PHASE</th><th>TT</th></tr></thead>
-<tbody>
+</style><script>setTimeout(()=>location.reload(), 5000);</script></head><body>
+<div class="header"><h1>V50 · ${game.toUpperCase()}</h1>
+<div class="env-box">
+<div class="env-row"><span>🌍 Môi trường</span><span class="env-val">${env.type}</span></div>
+<div class="env-row"><span>🎯 Độ tin cậy</span><span class="env-val">${(env.confidence*100).toFixed(1)}%</span></div>
+<div class="env-row"><span>📊 EFS</span><span class="env-val">${env.efs}%</span></div>
+<div class="env-row"><span>💎 Tinh khiết</span><span class="env-val">${(env.purity*100).toFixed(1)}%</span></div>
+<div class="env-row"><span>🌫️ Nhiễu</span><span class="env-val">${(env.entropy*100).toFixed(1)}%</span></div>
+<div class="env-row"><span>⚖️ Nghiêng</span><span class="env-val">${env.dominant ? label(env.dominant) : 'CÂN BẰNG'}</span></div>
+<div class="efs-bar"><div class="efs-fill" style="width:${env.efs}%"></div></div></div>
+<div style="text-align:center;font-size:13px;color:#fff">Chính xác: <strong>${acc}%</strong> (${settled.length} phiên)</div></div>
+<div class="table-wrap"><table><thead><tr><th>PHIÊN</th><th>XX</th><th>TỔNG</th><th>KQ</th><th>DỰ ĐOÁN</th><th>TỈ LỆ</th><th>MÔI TRƯỜNG</th><th>PHASE</th><th>TT</th></tr></thead><tbody>
 ${rows.map(it => {
     const dice = (it.xucXac || []).join('-');
     const kq = it.ketQua === 'T' ? 'tai' : 'xiu';
     const dd = it.DU_DOAN_CODE === 'T' ? 'tai' : (it.DU_DOAN_CODE === 'X' ? 'xiu' : '');
     const tt = it.trangThai === 'ĐÚNG' ? 'dung' : (it.trangThai === 'SAI' ? 'sai' : 'cho');
     const phaseCls = it.phase === 'READY' ? 'phase-ready' : 'phase-warm';
-    return `<tr>
-        <td class="session">${it.phien}</td><td class="dice">${dice}</td>
+    return `<tr><td class="session">${it.phien}</td><td class="dice">${dice}</td>
         <td><span class="sum">${it.tong || ''}</span></td><td class="${kq}">${it.ketQuaLabel || ''}</td>
-        <td class="${dd}">${it.DU_DOAN || '—'}</td>
-        <td><span class="ti-le">${it.TI_LE}</span></td>
-        <td><span class="env-tag">${it.envType || '—'}</span></td>
-        <td><span class="${phaseCls}">${it.phase || '—'}</span></td>
-        <td class="${tt}">${it.trangThai === 'ĐANG CHỜ' ? '...' : it.trangThai}</td>
-    </tr>`;
-}).join('')}
-</tbody></table></div>
-</body></html>`);
+        <td class="${dd}">${it.DU_DOAN || '—'}</td><td><span class="ti-le">${it.TI_LE}</span></td>
+        <td><span class="env-tag">${it.envType || '—'}</span></td><td><span class="${phaseCls}">${it.phase || '—'}</span></td>
+        <td class="${tt}">${it.trangThai === 'ĐANG CHỜ' ? '...' : it.trangThai}</td></tr>`;
+}).join('')}</tbody></table></div></body></html>`);
 });
 
 app.get('/', (req, res) => res.redirect('/ui/md5'));
-
-app.listen(PORT, () => console.log(`🚀 V49 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 V50 Server running on port ${PORT}`));
