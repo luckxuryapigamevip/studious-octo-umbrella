@@ -1,11 +1,15 @@
 'use strict';
-
+// ============================================================
+// SICBO AI V49 ULTIMATE - ALL MODELS + B52 + WARMUP + ENV
+// ============================================================
 const express = require('express');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -15,15 +19,16 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+// ============================================================
+// 1. CẤU HÌNH API
+// ============================================================
 const API_MD5 = 'https://taixiumd5.maksh3979madfw.com/api/md5luckydice/GetSoiCau';
 const API_TX  = 'https://taixiu.maksh3979madfw.com/api/luckydice/GetSoiCau';
+const API_B52 = 'https://jakpotgwab.geightdors.net/glms/v1/notify/taixiu?platform_id=b5&gid=vgmn_101';
+
 const DB_DIR = process.env.DB_DIR || __dirname;
 const TICK_MS = 5000;
 
-// ========================================================================
-// CONFIG & BASE WEIGHTS
-// ========================================================================
 const CONFIG = {
     WARMUP: { MIN_SESSIONS: 15, FULL_SESSIONS: 60, EFS_TARGET: 80 },
     ENV: { MIN_SAMPLES: 10 }
@@ -44,9 +49,9 @@ const DEFAULT_PATTERN_WEIGHTS = {
 
 if (!fs.existsSync(DB_DIR)) { try { fs.mkdirSync(DB_DIR, { recursive: true }); } catch (e) {} }
 
-// ========================================================================
-// 0. UTILS
-// ========================================================================
+// ============================================================
+// 2. UTILS & DATABASE
+// ============================================================
 function safeInt(x, def = 0) { const n = parseInt(x, 10); return Number.isFinite(n) ? n : def; }
 function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
 const label = c => c === 'T' ? 'TÀI' : (c === 'X' ? 'XỈU' : null);
@@ -64,25 +69,24 @@ function entropyBits(arr) {
     return h;
 }
 
-// ========================================================================
-// 1. DATABASE
-// ========================================================================
-function dbPath(g) { return path.join(DB_DIR, `db_v45_${g}.json`); }
+function dbPath(g) { return path.join(DB_DIR, `db_v49_${g}.json`); }
 function readDB(g) {
     const p = dbPath(g);
     try {
         if (fs.existsSync(p)) {
             const db = JSON.parse(fs.readFileSync(p, 'utf8'));
             if (!db.weights) db.weights = {};
+            if (!db.patternStats) db.patternStats = {};
             if (!db.streakStats) db.streakStats = { T: {}, X: {} };
             return db;
         }
     } catch (e) {}
-    return { history: [], lastSession: null, weights: {}, streakStats: { T: {}, X: {} }, envProfile: null };
+    return { history: [], lastSession: null, weights: {}, patternStats: {}, streakStats: { T: {}, X: {} }, envProfile: null };
 }
 function saveDB(g, db) {
     try { fs.writeFileSync(dbPath(g), JSON.stringify(db, null, 2)); } catch (e) {}
 }
+
 function getDice(it) { return [safeInt(it?.FirstDice), safeInt(it?.SecondDice), safeInt(it?.ThirdDice)]; }
 function getSum(it) {
     const s = getDice(it).reduce((a, b) => a + b, 0);
@@ -93,26 +97,19 @@ function getResult(it) {
     return (s >= 3 && s <= 18) ? (s >= 11 ? 'T' : 'X') : null;
 }
 
-function updateStreakStats(seq, db) {
-    if (!db.streakStats) db.streakStats = { T: {}, X: {} };
-    let cur = seq[0], len = 1;
-    for (let i = 1; i < seq.length; i++) {
-        if (seq[i] === cur) len++;
-        else {
-            if (!db.streakStats[cur][len]) db.streakStats[cur][len] = { cont: 0, stop: 0 };
-            db.streakStats[cur][len].stop++;
-            for (let l = 1; l < len; l++) {
-                if (!db.streakStats[cur][l]) db.streakStats[cur][l] = { cont: 0, stop: 0 };
-                db.streakStats[cur][l].cont++;
-            }
-            cur = seq[i]; len = 1;
-        }
-    }
+// B52 Helpers
+function getB52Dice(it) { return [safeInt(it?.d1), safeInt(it?.d2), safeInt(it?.d3)]; }
+function getB52Sum(it) { return getB52Dice(it).reduce((a, b) => a + b, 0); }
+function getB52Result(it) {
+    const s = getB52Sum(it);
+    if (it.rs === 'T' || it.rs === 'TAI') return 'T';
+    if (it.rs === 'X' || it.rs === 'XIU') return 'X';
+    return (s >= 11 && s <= 18) ? 'T' : 'X';
 }
 
-// ========================================================================
-// 2. NHẬN DIỆN MÔI TRƯỜNG
-// ========================================================================
+// ============================================================
+// 3. NHẬN DIỆN MÔI TRƯỜNG
+// ============================================================
 function profileEnvironment(seq) {
     const L = seq.length;
     if (L < CONFIG.ENV.MIN_SAMPLES) {
@@ -122,6 +119,7 @@ function profileEnvironment(seq) {
     const xCount = L - tCount;
     const balance = Math.abs(tCount - xCount) / L;
     const entropy = entropyBits(seq);
+    
     let streaks = [], cur = seq[0], len = 1;
     for (let i = 1; i < L; i++) {
         if (seq[i] === cur) len++;
@@ -130,6 +128,7 @@ function profileEnvironment(seq) {
     streaks.push(len);
     const maxStreak = Math.max(...streaks);
     const streakRatio = streaks.filter(s => s >= 3).length / streaks.length;
+    
     const rec20 = seq.slice(-Math.min(20, L));
     let flips20 = 0;
     for (let i = 1; i < rec20.length; i++) if (rec20[i] !== rec20[i-1]) flips20++;
@@ -137,6 +136,7 @@ function profileEnvironment(seq) {
 
     let type = 'HỖN_HỢP', confidence = 0.5;
     const purity = 1 - entropy;
+    
     if (entropy > 0.90) { type = 'NHIỄU'; confidence = clamp((entropy - 0.90) * 10, 0, 1); }
     else if (entropy < 0.50 && (streakRatio > 0.3 || maxStreak >= 4)) { type = 'BỆT'; confidence = clamp((0.5 - entropy) * 2, 0.5, 1); }
     else if (zigzagRatio > 0.75 && entropy > 0.7) { type = 'ZIGZAG'; confidence = clamp((zigzagRatio - 0.75) * 4, 0.5, 1); }
@@ -162,11 +162,12 @@ function profileEnvironment(seq) {
     return { type, confidence, efs: Math.round(efs*10)/10, purity, entropy, dominant, availablePatterns: available, disabledPatterns: disabled, stats: { L, tCount, xCount, maxStreak, zigzagRatio } };
 }
 
-// ========================================================================
-// 3. TẠO ALL PATTERNS
-// ========================================================================
+// ============================================================
+// 4. ALL THUẬT TOÁN CẦU (TÍCH HỢP TỪ BẢN V11)
+// ============================================================
 function generateAllPatterns() {
     const A = [];
+    // 1. BỆT
     for (let minLen = 2; minLen <= 8; minLen++) {
         A.push({ id: `streak_learn_${minLen}`, baseFamily: 'cau_bet', fn: (seq, sums, db) => {
             const n = seq.length, last = seq[n - 1]; let len = 1;
@@ -180,6 +181,7 @@ function generateAllPatterns() {
             return null;
         }});
     }
+    // 2. ĐẢO 1-1
     for (let win = 4; win <= 10; win++) {
         A.push({ id: `bounce_${win}`, baseFamily: 'cau_dao_11', fn: (seq) => {
             const n = seq.length; if (n < win + 1) return null;
@@ -188,6 +190,7 @@ function generateAllPatterns() {
             return flips === win ? { code: flip(seq[n - 1]), name: `ĐẢO-1-1-W${win}`, conf: 0.75 } : null;
         }});
     }
+    // 3. ZIGZAG
     for (let p = 2; p <= 8; p++) {
         A.push({ id: `zigzag_${p}`, baseFamily: p===2?'cau_22':(p===3?'cau_33':'cau_ziczac'), fn: (seq) => {
             const n = seq.length; if (n < p * 2 + 2) return null;
@@ -195,6 +198,7 @@ function generateAllPatterns() {
             return { code: seq[n - p], name: `ZIGZAG-${p}`, conf: 0.72 };
         }});
     }
+    // 4. MARKOV
     for (let k = 2; k <= 10; k++) {
         A.push({ id: `markov_${k}`, baseFamily: 'markov_chain', fn: (seq) => {
             const n = seq.length; if (n < k + 6) return null;
@@ -206,6 +210,7 @@ function generateAllPatterns() {
             return { code: pT > pX ? 'T' : 'X', name: `MARKOV-${k}`, conf: Math.max(pT, pX) };
         }});
     }
+    // 5. N-GRAM
     for (let len = 3; len <= 10; len++) {
         A.push({ id: `ngram_${len}`, baseFamily: 'distribution', fn: (seq) => {
             const n = seq.length; if (n < len + 5) return null;
@@ -219,6 +224,7 @@ function generateAllPatterns() {
             return { code: pT > pX ? 'T' : 'X', name: `NGRAM-${len}`, conf: Math.max(pT, pX) };
         }});
     }
+    // 6. CHU KỲ
     for (let p = 2; p <= 20; p++) {
         A.push({ id: `cycle_${p}`, baseFamily: 'cau_chu_ky', fn: (seq) => {
             const n = seq.length; if (n < p * 2 + 2) return null;
@@ -229,6 +235,7 @@ function generateAllPatterns() {
             return null;
         }});
     }
+    // 7. GAP & PULL
     for (let w = 20; w <= 60; w += 10) {
         A.push({ id: `pull_${w}`, baseFamily: 'resistance_support', fn: (seq) => {
             const n = seq.length; if (n < w) return null;
@@ -238,6 +245,7 @@ function generateAllPatterns() {
             return null;
         }});
     }
+    // 8. FRACTAL
     for (let sc = 3; sc <= 9; sc++) {
         A.push({ id: `fractal_${sc}`, baseFamily: 'cau_tu_nhien', fn: (seq) => {
             const n = seq.length; if (n < sc * 3) return null;
@@ -252,6 +260,7 @@ function generateAllPatterns() {
             return { code: pT > pX ? 'T' : 'X', name: `FRACTAL-${sc}`, conf: Math.max(pT, pX) };
         }});
     }
+    // 9. GƯƠNG / PALINDROME
     for (let half = 3; half <= 8; half++) {
         A.push({ id: `mirror_${half}`, baseFamily: 'cau_doi', fn: (seq) => {
             const n = seq.length; if (n < half * 2 + 2) return null;
@@ -261,6 +270,7 @@ function generateAllPatterns() {
             return null;
         }});
     }
+    // 10. CUSUM
     for (let w = 10; w <= 30; w += 10) {
         A.push({ id: `cusum_${w}`, baseFamily: 'break_pattern', fn: (seq) => {
             const n = seq.length; if (n < w) return null;
@@ -276,11 +286,11 @@ function generateAllPatterns() {
 }
 
 const ALL_ALGOS = generateAllPatterns();
-console.log(`✅ Đã nạp ${ALL_ALGOS.length} thuật toán.`);
+console.log(`✅ Đã nạp ${ALL_ALGOS.length} thuật toán / cầu mẫu.`);
 
-// ========================================================================
-// 4. TỔNG HỢP KHÔNG THIÊN VỊ (FIX LỖI RA TÀI BỪA)
-// ========================================================================
+// ============================================================
+// 5. TỔNG HỢP KHÔNG THIÊN VỊ
+// ============================================================
 function runUnbiasedEnsemble(seq, sums, db, env) {
     const disabled = new Set(env.disabledPatterns);
     let votesT = [], votesX = [], details = [];
@@ -363,9 +373,9 @@ function runUnbiasedEnsemble(seq, sums, db, env) {
     };
 }
 
-// ========================================================================
-// 5. FETCH & PROCESS
-// ========================================================================
+// ============================================================
+// 6. FETCH & PROCESS
+// ============================================================
 async function fetchApi(url) {
     try {
         const res = await axios.get(url, { timeout: 8000 });
@@ -375,16 +385,54 @@ async function fetchApi(url) {
     } catch (e) { return []; }
 }
 
+async function fetchB52() {
+    try {
+        const res = await axios.get(API_B52, { timeout: 8000 });
+        return res.data?.data || [];
+    } catch (e) { return []; }
+}
+
+function updateStreakStats(seq, db) {
+    if (!db.streakStats) db.streakStats = { T: {}, X: {} };
+    let cur = seq[0], len = 1;
+    for (let i = 1; i < seq.length; i++) {
+        if (seq[i] === cur) len++;
+        else {
+            if (!db.streakStats[cur][len]) db.streakStats[cur][len] = { cont: 0, stop: 0 };
+            db.streakStats[cur][len].stop++;
+            for (let l = 1; l < len; l++) {
+                if (!db.streakStats[cur][l]) db.streakStats[cur][l] = { cont: 0, stop: 0 };
+                db.streakStats[cur][l].cont++;
+            }
+            cur = seq[i]; len = 1;
+        }
+    }
+}
+
 async function processGame(game) {
-    const list = await fetchApi(game === 'md5' ? API_MD5 : API_TX);
+    let list = [];
+    if (game === 'b52') list = await fetchB52();
+    else list = await fetchApi(game === 'md5' ? API_MD5 : API_TX);
+    
     if (!list || !list.length) return;
 
     const latest = list[list.length - 1];
-    const session = safeInt(latest.SessionId);
+    const session = game === 'b52' ? safeInt(latest.sid) : safeInt(latest.SessionId);
     const db = readDB(game);
     if (db.lastSession === session) return;
 
-    const seq = list.map(getResult).filter(Boolean);
+    let seq, sums, pred, currentResult;
+    
+    if (game === 'b52') {
+        seq = list.map(getB52Result).filter(Boolean);
+        sums = list.map(getB52Sum).filter(s => s >= 3 && s <= 18);
+        currentResult = getB52Result(latest);
+    } else {
+        seq = list.map(getResult).filter(Boolean);
+        sums = list.map(getSum).filter(s => s >= 3 && s <= 18);
+        currentResult = getResult(latest);
+    }
+
     if (seq.length < 15) {
         db.lastSession = session;
         saveDB(game, db);
@@ -395,26 +443,26 @@ async function processGame(game) {
     const env = profileEnvironment(seq);
     db.envProfile = env;
 
-    const sums = list.map(getSum).filter(s => s >= 3 && s <= 18);
-    const pred = runUnbiasedEnsemble(seq, sums, db, env);
+    pred = runUnbiasedEnsemble(seq, sums, db, env);
 
     const prev = db.history[db.history.length - 1];
     if (prev && safeInt(prev.phienDuDoan) === session && prev.DU_DOAN_CODE) {
-        const actual = getResult(latest);
-        prev.trangThai = prev.DU_DOAN_CODE === actual ? 'ĐÚNG' : 'SAI';
+        prev.trangThai = prev.DU_DOAN_CODE === currentResult ? 'ĐÚNG' : 'SAI';
         for (const d of (prev.algoDetails || [])) {
             if (!db.weights[d.algo]) db.weights[d.algo] = { w: 1.0 };
-            if (d.code === actual) db.weights[d.algo].w = clamp(db.weights[d.algo].w + 0.05, 0.5, 2.0);
+            if (d.code === currentResult) db.weights[d.algo].w = clamp(db.weights[d.algo].w + 0.05, 0.5, 2.0);
             else db.weights[d.algo].w = clamp(db.weights[d.algo].w - 0.05, 0.5, 2.0);
         }
     }
 
     db.history.push({
-        phien: session, xucXac: getDice(latest), tong: getSum(latest),
-        ketQua: getResult(latest), ketQuaLabel: label(getResult(latest)),
+        phien: session, 
+        xucXac: game === 'b52' ? getB52Dice(latest) : getDice(latest), 
+        tong: game === 'b52' ? getB52Sum(latest) : getSum(latest),
+        ketQua: currentResult, ketQuaLabel: label(currentResult),
         phienDuDoan: session + 1,
         DU_DOAN_CODE: pred.code, 
-        DU_DOAN: label(pred.code), // Lưu TÀI/XỈU
+        DU_DOAN: label(pred.code), 
         TI_LE: pred.tiLe,
         patternName: pred.label,
         algoDetails: pred.details,
@@ -429,28 +477,44 @@ async function processGame(game) {
     saveDB(game, db);
 }
 
-setInterval(() => { processGame('md5'); processGame('taixiu'); }, TICK_MS);
+setInterval(() => { 
+    processGame('md5'); 
+    processGame('taixiu'); 
+    processGame('b52'); 
+}, TICK_MS);
 
-// ========================================================================
-// 6. ROUTE JSON (FIX LỖI TRẢ RA TÀI/XỈU)
-// ========================================================================
+// ============================================================
+// 7. ROUTERS
+// ============================================================
 function buildJsonResponse(game, list, db, env, pred) {
     const settled = db.history.filter(h => h.trangThai === 'ĐÚNG' || h.trangThai === 'SAI');
     const win = settled.filter(h => h.trangThai === 'ĐÚNG').length;
     const lose = settled.filter(h => h.trangThai === 'SAI').length;
 
     const duDoanText = pred ? label(pred.code) : null;
+    const latest = list[list.length - 1];
+    
+    let phienHienTai, xucXac, tongDiem;
+    if (game === 'b52') {
+        phienHienTai = String(safeInt(latest.sid));
+        xucXac = getB52Dice(latest);
+        tongDiem = getB52Sum(latest);
+    } else {
+        phienHienTai = String(safeInt(latest.SessionId));
+        xucXac = getDice(latest);
+        tongDiem = getSum(latest);
+    }
 
     return {
         status: "success",
         data: {
-            phienHienTai: String(safeInt(list[list.length-1].SessionId)),
-            phienDuDoan: String(safeInt(list[list.length-1].SessionId) + 1),
-            duDoan: duDoanText, // FIX: Trả ra TÀI hoặc XỈU
+            phienHienTai: phienHienTai,
+            phienDuDoan: String(safeInt(phienHienTai) + 1),
+            duDoan: duDoanText, 
             tiLe: pred ? pred.tiLe : "—",
             liDo: pred ? `⭐ ${pred.label} → ${duDoanText} (${pred.tiLe})` : `⏳ Đang quét ${env.stats.L}/15 phiên...`,
-            xucXac: getDice(list[list.length-1]),
-            tongDiem: getSum(list[list.length-1]),
+            xucXac: xucXac,
+            tongDiem: tongDiem,
             moiTruong: {
                 loai: env.type,
                 doTinCay: env.confidence.toFixed(2),
@@ -488,12 +552,22 @@ app.get('/md5', async (req, res) => {
     res.json(buildJsonResponse('md5', list, db, env, pred));
 });
 
-// ========================================================================
-// 7. ROUTE UI
-// ========================================================================
+app.get('/b52', async (req, res) => {
+    const list = await fetchB52(); const db = readDB('b52');
+    if (!list || !list.length) return res.status(500).json({ status: "error", message: "Không lấy được dữ liệu B52" });
+    const seq = list.map(getB52Result).filter(Boolean);
+    const sums = list.map(getB52Sum).filter(s => s >= 3 && s <= 18);
+    const env = profileEnvironment(seq);
+    const pred = seq.length >= 15 ? runUnbiasedEnsemble(seq, sums, db, env) : null;
+    res.json(buildJsonResponse('b52', list, db, env, pred));
+});
+
+// ============================================================
+// 8. ROUTE UI
+// ============================================================
 app.get('/ui/:game', (req, res) => {
     const game = req.params.game;
-    if (game !== 'md5' && game !== 'taixiu') return res.send('Game không hợp lệ');
+    if (game !== 'md5' && game !== 'taixiu' && game !== 'b52') return res.send('Game không hợp lệ');
     const db = readDB(game);
     const rows = db.history.slice(-80).reverse();
     const settled = db.history.filter(h => h.trangThai === 'ĐÚNG' || h.trangThai === 'SAI');
@@ -504,7 +578,7 @@ app.get('/ui/:game', (req, res) => {
     res.send(`<!DOCTYPE html>
 <html lang="vi"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>V45 - ${game.toUpperCase()}</title>
+<title>V49 - ${game.toUpperCase()}</title>
 <style>
 *{box-sizing:border-box}
 body{font-family:-apple-system,sans-serif;background:#0a0e27;color:#e6eef6;padding:12px;margin:0;}
@@ -533,7 +607,7 @@ td{padding:8px 3px;text-align:center;border-bottom:1px solid #1e293b;}
 <script>setTimeout(()=>location.reload(), 5000);</script>
 </head><body>
 <div class="header">
-  <h1>V45 · ${game.toUpperCase()}</h1>
+  <h1>V49 · ${game.toUpperCase()}</h1>
   <div class="env-box">
     <div class="env-row"><span>🌍 Môi trường</span><span class="env-val">${env.type}</span></div>
     <div class="env-row"><span>🎯 Độ tin cậy</span><span class="env-val">${(env.confidence*100).toFixed(1)}%</span></div>
@@ -570,4 +644,4 @@ ${rows.map(it => {
 
 app.get('/', (req, res) => res.redirect('/ui/md5'));
 
-app.listen(PORT, () => console.log(`🚀 V45 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 V49 Server running on port ${PORT}`));
